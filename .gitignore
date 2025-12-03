@@ -1,0 +1,30 @@
+# 调试文件
+__debug_bin*.exe
+__debug_bin*
+.debug/
+
+# 编译文件
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试文件
+*.test
+*.out
+
+# Go 工作空间文件
+go.work
+go.work.sum
+
+# 依赖
+vendor/
+
+# IDE
+.vscode/
+.idea/
+
+# 数据库文件（如果需要忽略）
+# *.db
+

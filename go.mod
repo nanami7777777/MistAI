@@ -2,7 +2,14 @@ module Mist
 
 go 1.24.3
 
-require fyne.io/fyne/v2 v2.7.1
+require (
+	fyne.io/fyne/v2 v2.7.1
+	github.com/atotto/clipboard v0.1.4
+	github.com/robotn/gohook v0.42.2
+	github.com/sirupsen/logrus v1.9.3
+	gorm.io/driver/sqlite v1.6.0
+	gorm.io/gorm v1.31.1
+)
 
 require (
 	fyne.io/systray v1.11.1-0.20250603113521-ca66a66d8b58 // indirect
@@ -34,12 +41,11 @@ require (
 	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
+	github.com/vcaesar/keycode v0.10.1 // indirect
 	github.com/yuin/goldmark v1.7.8 // indirect
 	golang.org/x/image v0.24.0 // indirect
 	golang.org/x/net v0.35.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
 	golang.org/x/text v0.22.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	gorm.io/driver/sqlite v1.6.0 // indirect
-	gorm.io/gorm v1.31.1 // indirect
 )

@@ -3,6 +3,7 @@ package mywidget
 import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/widget"
+
 )
 
 type MyMultiLine struct {
@@ -25,5 +26,5 @@ func (m *MyMultiLine) TypedKey(k *fyne.KeyEvent) {
 			m.OnEnter()
 		}
 	}
-	m.Entry.TypedKey(k) // call base behavior
+	m.Entry.TypedKey(k) // call base behav ior
 }

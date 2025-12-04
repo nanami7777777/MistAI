@@ -2,13 +2,10 @@ package gui
 
 import (
 	mywidget "Mist/MyWidget"
-	"Mist/config"
-	"Mist/database"
-	"Mist/global"
-	"Mist/llm"
+	"Mist/service"
 	"fmt"
-	"strings"
 	"sync"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -21,20 +18,44 @@ import (
 )
 
 var (
-	messages         []global.Message
-	mu               sync.Mutex
-	entry            *mywidget.MyMultiLine
-	chatList         *fyne.Container
-	scroll           *container.Scroll
-	conversationList *fyne.Container
-	currentConvID    uint
-	mainWindow       fyne.Window
+	messages                  []service.Message
+	mu                        sync.Mutex
+	entry                     *mywidget.MyMultiLine
+	chatList                  *fyne.Container
+	scroll                    *container.Scroll
+	conversationList          *fyne.Container
+	currentConvID             uint
+	mainWindow                fyne.Window
+	messageService            *service.MessageService
+	conversationService       *service.ConversationService
+	configService             *service.ConfigService
+	currentStreamingLabel     *widget.Label
+	currentStreamingContainer *fyne.Container
 )
+
+// Global map to store message metadata for efficient lookup
+var messageMetadata = make(map[*fyne.Container]MessageMetadata)
+var metadataMu sync.RWMutex
+
+// MessageMetadata stores metadata for a message widget
+type MessageMetadata struct {
+	ID      uint
+	Sender  string
+	Content string
+}
 
 // Run 启动并运行 Fyne GUI
 func Run() {
-	// 获取当前对话ID（由 database 管理）
-	currentConvID = database.GetCurrentConversationID()
+	// Initialize services
+	messageService = service.NewMessageService()
+	conversationService = service.NewConversationService()
+	configService = service.NewConfigService()
+
+	// Set up event handlers
+	messageService.SetMessageEventHandler(handleMessageEvent)
+
+	// 获取当前对话ID（由 conversation service 管理）
+	currentConvID = conversationService.GetCurrentConversationID()
 
 	myApp := app.New()
 	w := myApp.NewWindow("AI 助手")
@@ -42,8 +63,8 @@ func Run() {
 
 	// 创建对话列表容器
 	conversationList = container.NewVBox()
-	// 加载并显示对话列表
-	refreshConversationList()
+	// 异步加载并显示对话列表
+	refreshConversationListAsync()
 
 	// 对话列表的滚动容器
 	convScroll := container.NewVScroll(conversationList)
@@ -51,20 +72,20 @@ func Run() {
 
 	// 新建对话按钮
 	newConvBtn := widget.NewButton("新建对话", func() {
-		conv, err := database.CreateConversation("新对话")
+		conv, err := conversationService.CreateConversation("新对话")
 		if err != nil {
-			fmt.Printf("创建对话失败: %v\n", err)
+			showError("创建对话失败", err)
 			return
 		}
 		switchConversation(conv.ID)
-		refreshConversationList()
 	})
 
 	convListContainer := container.NewBorder(newConvBtn, nil, nil, nil, convScroll)
 
 	// 聊天区
 	chatList = container.NewVBox()
-	loadCurrentConversationMessages()
+	// 异步加载消息
+	loadCurrentConversationMessagesAsync()
 
 	scroll = container.NewVScroll(chatList)
 	scroll.SetMinSize(fyne.NewSize(200, 300))
@@ -74,12 +95,12 @@ func Run() {
 
 	// 清除聊天记录按钮
 	clearBtn := widget.NewButton("清除记录", func() {
-		if err := database.ClearAllMessages(); err != nil {
-			fmt.Printf("清除记录失败: %v\n", err)
+		if err := messageService.ClearAllMessages(); err != nil {
+			showError("清除记录失败", err)
 			return
 		}
 		mu.Lock()
-		messages = []global.Message{}
+		messages = []service.Message{}
 		mu.Unlock()
 		chatList.RemoveAll()
 		chatList.Refresh()
@@ -110,6 +131,7 @@ func Run() {
 			entry.SetText(txt)
 			w.Canvas().Focus(entry)
 			entry.Refresh()
+			w.Hide()
 			w.Show()
 			w.RequestFocus()
 		})
@@ -124,17 +146,81 @@ func Run() {
 	w.ShowAndRun()
 }
 
+// handleMessageEvent handles events from the message service
+func handleMessageEvent(event service.MessageEvent) {
+	fyne.Do(func() {
+		switch event.Type {
+		case "user_message_sent":
+			if event.Message != nil {
+				appendMessage(chatList, "你", event.Message.Content, event.Message.ID)
+				entry.SetText("")
+			}
+		case "ai_response_start":
+			// Create streaming message container
+			currentStreamingLabel = widget.NewLabel("AI: ")
+			currentStreamingLabel.Wrapping = fyne.TextWrapWord
+			currentStreamingContainer = container.NewVBox(currentStreamingLabel)
+			chatList.Add(currentStreamingContainer)
+			scroll.ScrollToBottom()
+		case "ai_response_chunk":
+			// Update streaming content in real-time
+			if currentStreamingLabel != nil && event.Content != "" {
+				currentText := currentStreamingLabel.Text
+				currentStreamingLabel.SetText(currentText + event.Content)
+				currentStreamingLabel.Refresh()
+				scroll.ScrollToBottom()
+			}
+		case "ai_response_complete":
+			if event.Message != nil {
+				mu.Lock()
+				messages = append(messages, *event.Message)
+				mu.Unlock()
+
+				// Replace streaming container with final message
+				if currentStreamingContainer != nil {
+					// Remove streaming container
+					removeContainerFromList(chatList, currentStreamingContainer)
+					currentStreamingContainer = nil
+					currentStreamingLabel = nil
+				}
+
+				// Add final message with delete button
+				appendMessage(chatList, "AI", event.Message.Content, event.Message.ID)
+				scroll.ScrollToBottom()
+			}
+		case "error":
+			if event.Error != nil {
+				dialog.ShowError(fmt.Errorf("发生错误: %v", event.Error), mainWindow)
+			}
+		}
+	})
+}
+
+// showError shows an error dialog
+func showError(operation string, err error) {
+	fmt.Printf("%s: %v\n", operation, err)
+	dialog.ShowError(fmt.Errorf("%s: %v", operation, err), mainWindow)
+}
+
+// refreshConversationListAsync 异步刷新对话列表
+func refreshConversationListAsync() {
+	go func() {
+		fyne.Do(refreshConversationList)
+	}()
+}
+
 // refreshConversationList 刷新对话列表
 func refreshConversationList() {
+
 	conversationList.RemoveAll()
 
-	conversations, err := database.GetAllConversations()
+	conversations, err := conversationService.GetAllConversations()
 	if err != nil {
-		fmt.Printf("加载对话列表失败: %v\n", err)
+		showError("加载对话列表失败", err)
 		return
 	}
 
-	currentID := database.GetCurrentConversationID()
+	currentID := conversationService.GetCurrentConversationID()
 
 	for _, conv := range conversations {
 		convID := conv.ID
@@ -152,7 +238,7 @@ func refreshConversationList() {
 		deleteBtn := widget.NewButton("删除", func(id uint) func() {
 			return func() {
 				if id == currentID {
-					conversations, _ := database.GetAllConversations()
+					conversations, _ := conversationService.GetAllConversations()
 					found := false
 					for _, c := range conversations {
 						if c.ID != id {
@@ -162,19 +248,19 @@ func refreshConversationList() {
 						}
 					}
 					if !found {
-						newConv, err := database.CreateConversation("新对话")
+						newConv, err := conversationService.CreateConversation("新对话")
 						if err != nil {
-							fmt.Printf("创建新对话失败: %v\n", err)
+							showError("创建新对话失败", err)
 							return
 						}
 						switchConversation(newConv.ID)
 					}
 				}
-				if err := database.DeleteConversation(id); err != nil {
-					fmt.Printf("删除对话失败: %v\n", err)
+				if err := conversationService.DeleteConversation(id); err != nil {
+					showError("删除对话失败", err)
 					return
 				}
-				refreshConversationList()
+				refreshConversationListAsync() // Also make this async
 			}
 		}(convID))
 
@@ -187,58 +273,140 @@ func refreshConversationList() {
 
 // switchConversation 切换对话
 func switchConversation(convID uint) {
-	if err := database.SetCurrentConversationID(convID); err != nil {
-		fmt.Printf("切换对话失败: %v\n", err)
+	if err := conversationService.SwitchConversation(convID); err != nil {
+		showError("切换对话失败", err)
 		return
 	}
 	currentConvID = convID
-	loadCurrentConversationMessages()
-	refreshConversationList()
+	loadCurrentConversationMessagesAsync() // Make this async
+	refreshConversationListAsync()         // Make this async
+}
+
+// loadCurrentConversationMessagesAsync 异步加载当前对话的消息
+func loadCurrentConversationMessagesAsync() {
+	go func() {
+		fyne.Do(loadCurrentConversationMessages)
+	}()
 }
 
 // loadCurrentConversationMessages 加载当前对话的消息
 func loadCurrentConversationMessages() {
 	chatList.RemoveAll()
 
-	history, err := database.LoadHistoryMessages()
+	starttime := time.Now()
+	history, err := messageService.LoadMessages()
 	if err != nil {
-		fmt.Printf("加载历史消息失败: %v\n", err)
+		showError("加载历史消息失败", err)
 		return
 	}
 
-	historyMessages := make([]global.Message, len(history))
-	for i, h := range history {
-		historyMessages[i] = global.Message{Role: h.Role, Content: h.Content}
-	}
-
 	mu.Lock()
-	messages = historyMessages
+	messages = history
 	mu.Unlock()
 
-	for i, msg := range historyMessages {
-		sender := "你"
-		if msg.Role == "assistant" {
-			sender = "AI"
-		} else if msg.Role == "system" {
-			continue
-		}
-		appendMessage(chatList, sender, msg.Content, history[i].ID)
+	// Limit the number of messages we display initially to improve performance
+	// Based on our memory, we should cap initial rendering
+	maxMessagesToShow := 100
+	startIndex := 0
+	if len(history) > maxMessagesToShow {
+		startIndex = len(history) - maxMessagesToShow
 	}
 
-	chatList.Refresh()
+	fmt.Println("读取历史消息耗时：", time.Since(starttime))
+	for i := startIndex; i < len(history); i++ {
+		sender := "你"
+		if history[i].Role == "assistant" {
+			sender = "AI"
+		} else if history[i].Role == "system" {
+			continue
+		}
+		appendMessage(chatList, sender, history[i].Content, history[i].ID)
+	}
+	fmt.Println("界面渲染耗时：", time.Since(starttime))
+
 	if scroll != nil {
 		scroll.ScrollToBottom()
 	}
 }
 
-// createMessageWithDeleteButton 创建带删除按钮的消息容器
-func createMessageWithDeleteButton(label *widget.Label, messageID uint, onDelete func()) *fyne.Container {
-	deleteBtn := widget.NewButton("删除", onDelete)
-	
+// createMessageWithDeleteButton creates a message container with a delete button
+// Uses a shared delete handler with message ID to avoid creating closures in loops
+func createMessageWithDeleteButton(label *widget.Label, messageID uint) *fyne.Container {
+	deleteBtn := widget.NewButton("删除", func() {
+		handleDeleteMessage(messageID)
+	})
 	return container.NewBorder(nil, nil, nil, deleteBtn, label)
 }
 
-// removeContainerFromList 从容器中移除指定的元素
+// appendMessage adds a new message to the chat list
+func appendMessage(chatList *fyne.Container, sender, content string, messageID uint) {
+	label := widget.NewLabel(sender + ": " + content)
+	label.Wrapping = fyne.TextWrapWord
+
+	messageRow := createMessageWithDeleteButton(label, messageID)
+	chatList.Add(messageRow)
+
+	// Store metadata for this message
+	metadataMu.Lock()
+	messageMetadata[messageRow] = MessageMetadata{
+		ID:      messageID,
+		Sender:  sender,
+		Content: content,
+	}
+	metadataMu.Unlock()
+}
+
+// handleDeleteMessage handles deletion of a message by its ID
+func handleDeleteMessage(messageID uint) {
+	// Find the container and metadata associated with this message ID
+	var targetContainer *fyne.Container
+	var targetMetadata MessageMetadata
+
+	metadataMu.RLock()
+	for container, metadata := range messageMetadata {
+		if metadata.ID == messageID {
+			targetContainer = container
+			targetMetadata = metadata
+			break
+		}
+	}
+	metadataMu.RUnlock()
+
+	if targetContainer == nil {
+		showError("删除消息失败", fmt.Errorf("未找到要删除的消息"))
+		return
+	}
+
+	if err := messageService.DeleteMessage(messageID); err != nil {
+		showError("删除消息失败", err)
+		return
+	}
+
+	mu.Lock()
+	history, err := messageService.LoadMessages()
+	if err == nil {
+		messages = history
+	} else {
+		for i := range messages {
+			if (targetMetadata.Sender == "你" && messages[i].Role == "user" && messages[i].Content == targetMetadata.Content) ||
+				(targetMetadata.Sender == "AI" && messages[i].Role == "assistant" && messages[i].Content == targetMetadata.Content) {
+				messages = append(messages[:i], messages[i+1:]...)
+				break
+			}
+		}
+	}
+	mu.Unlock()
+
+	// Remove the container from the chat list
+	removeContainerFromList(chatList, targetContainer)
+
+	// Clean up metadata
+	metadataMu.Lock()
+	delete(messageMetadata, targetContainer)
+	metadataMu.Unlock()
+}
+
+// removeContainerFromList removes a container from a list
 func removeContainerFromList(list *fyne.Container, item *fyne.Container) {
 	index := -1
 	for i, obj := range list.Objects {
@@ -247,81 +415,11 @@ func removeContainerFromList(list *fyne.Container, item *fyne.Container) {
 			break
 		}
 	}
-	
+
 	if index != -1 {
 		list.Objects = append(list.Objects[:index], list.Objects[index+1:]...)
 		list.Refresh()
 	}
-}
-
-// getIndex 获取元素在切片中的索引
-
-func appendMessage(chatList *fyne.Container, sender, content string, messageID uint) {
-	label := widget.NewLabel(sender + ": " + content)
-	label.Wrapping = fyne.TextWrapWord
-
-	onDelete := func() {
-		if err := database.DeleteMessage(messageID); err != nil {
-			fmt.Printf("删除消息失败: %v\n", err)
-			return
-		}
-
-		mu.Lock()
-		history, err := database.LoadHistoryMessages()
-		if err == nil {
-			historyMessages := make([]global.Message, len(history))
-			for i, h := range history {
-				historyMessages[i] = global.Message{Role: h.Role, Content: h.Content}
-			}
-			messages = historyMessages
-		} else {
-			for i := range messages {
-				if (sender == "你" && messages[i].Role == "user" && messages[i].Content == content) ||
-					(sender == "AI" && messages[i].Role == "assistant" && messages[i].Content == content) {
-					messages = append(messages[:i], messages[i+1:]...)
-					break
-				}
-			}
-		}
-		mu.Unlock()
-
-		// 查找并删除对应的消息行
-		for _, obj := range chatList.Objects {
-			if container, ok := obj.(*fyne.Container); ok {
-				if container.Objects[1] == label { // 假设label在container中的位置是固定的
-					index := -1
-					for i, o := range chatList.Objects {
-						if o == container {
-							index = i
-							break
-						}
-					}
-					
-					if index != -1 {
-						chatList.Objects = append(chatList.Objects[:index], chatList.Objects[index+1:]...)
-						chatList.Refresh()
-					}
-					break
-				}
-			}
-		}
-	}
-
-	messageRow := createMessageWithDeleteButton(label, messageID, onDelete)
-	chatList.Add(messageRow)
-}
-
-func appendStreamingMessage(chatList *fyne.Container, sender string) (*widget.Label, *fyne.Container) {
-	label := widget.NewLabel(sender + ": ")
-	label.Wrapping = fyne.TextWrapWord
-
-	deleteBtn := widget.NewButton("删除", func() {})
-	deleteBtn.Disable()
-
-	messageRow := createMessageWithDeleteButton(label, 0, func() {}) // 流式消息暂时没有ID
-	chatList.Add(messageRow)
-
-	return label, messageRow
 }
 
 func sendMessage() {
@@ -330,113 +428,37 @@ func sendMessage() {
 		return
 	}
 
+	// Add user message to local messages array immediately
 	mu.Lock()
-	messages = append(messages, global.Message{Role: "user", Content: text})
+	messages = append(messages, service.Message{Role: "user", Content: text})
 	mu.Unlock()
 
-	userMsgID, err := database.SaveMessage("user", text)
-	if err != nil {
-		fmt.Printf("保存用户消息失败: %v\n", err)
-		return
-	}
-
-	appendMessage(chatList, "你", text, userMsgID)
-	entry.SetText("")
-
+	// Send message through service (non-blocking)
 	go func(userText string) {
-		mu.Lock()
-		messagesCopy := make([]global.Message, len(messages))
-		copy(messagesCopy, messages)
-		mu.Unlock()
+		req := service.SendMessageRequest{Content: userText}
+		// Create response channel for streaming
+		responseChan := make(chan string, 100)
 
-		var aiLabel *widget.Label
-		var aiMessageRow *fyne.Container
-		var fullContent strings.Builder
-		var aiMsgID uint
-
-		fyne.Do(func() {
-			aiLabel, aiMessageRow = appendStreamingMessage(chatList, "AI")
-			scroll.ScrollToBottom()
-		})
-
-		responseChan := make(chan string)
-		//持续接收通道中的数据
+		// Start goroutine to handle streaming response
 		go func() {
 			for chunk := range responseChan {
-				fyne.Do(func() {
-					//持续追加内容
-					fullContent.WriteString(chunk)
-					if aiLabel != nil {
-						aiLabel.SetText("AI: " + fullContent.String())
-						aiLabel.Refresh()
-						scroll.ScrollToBottom()
-					}
-				})
+				// The service will handle forwarding chunks to the event handler
+				_ = chunk
 			}
 		}()
-		response, err := llm.CallChatAPI(messagesCopy,responseChan)
+
+		_, err := messageService.StreamMessage(req, responseChan)
 		if err != nil {
-			response = "错误: " + err.Error()
 			fyne.Do(func() {
-				if aiLabel != nil {
-					aiLabel.SetText("AI: " + response)
-					aiLabel.Refresh()
+				showError("发送消息失败", err)
+				// Clean up streaming container on error
+				if currentStreamingContainer != nil {
+					removeContainerFromList(chatList, currentStreamingContainer)
+					currentStreamingContainer = nil
+					currentStreamingLabel = nil
 				}
 			})
 		}
-
-		if fullContent.Len() == 0 {
-			fullContent.WriteString(response)
-		}
-
-		finalResponse := fullContent.String()
-
-		mu.Lock()
-		messages = append(messages, global.Message{Role: "assistant", Content: finalResponse})
-		mu.Unlock()
-
-		aiMsgID, err = database.SaveMessage("assistant", finalResponse)
-		if err != nil {
-			fmt.Printf("保存 AI 回复失败: %v\n", err)
-		}
-
-		fyne.Do(func() {
-			if aiMessageRow != nil && aiLabel != nil {
-				index := -1
-				for i, obj := range chatList.Objects {
-					if obj == aiMessageRow {
-						index = i
-						break
-					}
-				}
-				
-				if index != -1 {
-					chatList.Objects = append(chatList.Objects[:index], chatList.Objects[index+1:]...)
-					chatList.Refresh()
-				}
-				
-				onDelete := func() {
-					if err := database.DeleteMessage(aiMsgID); err != nil {
-						fmt.Printf("删除消息失败: %v\n", err)
-						return
-					}
-					mu.Lock()
-					for i := range messages {
-						if messages[i].Role == "assistant" && messages[i].Content == finalResponse {
-							messages = append(messages[:i], messages[i+1:]...)
-							break
-						}
-					}
-					mu.Unlock()
-					removeContainerFromList(chatList, aiMessageRow)
-				}
-
-				aiMessageRow = createMessageWithDeleteButton(aiLabel, aiMsgID, onDelete)
-				chatList.Add(aiMessageRow)
-				chatList.Refresh()
-			}
-			scroll.ScrollToBottom()
-		})
 	}(text)
 }
 
@@ -445,14 +467,10 @@ func showSettingsDialog() {
 		return
 	}
 
-	cfg := config.GetConfig()
-	if cfg == nil {
-		var err error
-		cfg, err = config.LoadConfig()
-		if err != nil {
-			dialog.ShowError(fmt.Errorf("加载配置失败: %v", err), mainWindow)
-			return
-		}
+	cfg, err := configService.GetConfig()
+	if err != nil {
+		showError("加载配置失败", err)
+		return
 	}
 
 	settingsWindow := fyne.CurrentApp().NewWindow("设置")
@@ -489,8 +507,8 @@ func showSettingsDialog() {
 				return
 			}
 
-			newConfig := &config.AppConfig{APIKey: apiKeyEntry.Text, APIURL: apiURLEntry.Text, Model: modelEntry.Text}
-			if err := config.SaveConfig(newConfig); err != nil {
+			newConfig := &service.AppConfig{APIKey: apiKeyEntry.Text, APIURL: apiURLEntry.Text, Model: modelEntry.Text}
+			if err := configService.SaveConfig(newConfig); err != nil {
 				dialog.ShowError(fmt.Errorf("保存配置失败: %v", err), settingsWindow)
 				return
 			}

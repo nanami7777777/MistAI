@@ -6,11 +6,19 @@ import (
 	"os"
 )
 
+// MongoConfig MongoDB配置结构
+type MongoConfig struct {
+	ConnectionString  string `json:"connection_string"`
+	DatabaseName      string `json:"database_name"`
+	ConnectionTimeout int    `json:"connection_timeout"`
+}
+
 // AppConfig 应用配置结构
 type AppConfig struct {
-	APIKey string `json:"api_key"`
-	APIURL string `json:"api_url"`
-	Model  string `json:"model"`
+	APIKey  string      `json:"api_key"`
+	APIURL  string      `json:"api_url"`
+	Model   string      `json:"model"`
+	MongoDB MongoConfig `json:"mongodb"`
 }
 
 var (
@@ -27,6 +35,11 @@ func LoadConfig() (*AppConfig, error) {
 			APIKey: "cc8be4d98988431493a372bb7a39ff78.r3H7BoQMZ0hj8074",
 			APIURL: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
 			Model:  "glm-4.5-flash",
+			MongoDB: MongoConfig{
+				ConnectionString:  "mongodb://localhost:27017",
+				DatabaseName:      "chat_assistant",
+				ConnectionTimeout: 10,
+			},
 		}
 		if err := SaveConfig(defaultConfig); err != nil {
 			return nil, fmt.Errorf("创建默认配置失败: %v", err)
@@ -70,4 +83,3 @@ func SaveConfig(cfg *AppConfig) error {
 func GetConfig() *AppConfig {
 	return config
 }
-

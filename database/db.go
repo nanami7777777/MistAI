@@ -1,69 +1,153 @@
 package database
 
 import (
+	"context"
 	"fmt"
-	"strings"
 	"time"
 
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// Conversation 对话模型
+// Message 嵌入式消息结构
+type Message struct {
+	MID       int       `bson:"mid"`       // 消息序号
+	SenderID  string    `bson:"sender_id"` // 发送者ID: "user" 或 "assistant"
+	Content   string    `bson:"content"`   // 消息内容
+	Timestamp time.Time `bson:"timestamp"` // 消息时间戳
+	Status    string    `bson:"status"`    // 消息状态: "sent", "read", "deleted"
+}
+
+// Session 会话结构（嵌入式消息）
+type Session struct {
+	ID            primitive.ObjectID `bson:"_id,omitempty"`   // 会话ID
+	Type          string             `bson:"type"`            // 会话类型: "bot" (固定为机器人对话)
+	Name          string             `bson:"name"`            // 会话名称
+	Participants  []string           `bson:"participants"`    // 参与者: ["user", "assistant"]
+	CreatedAt     time.Time          `bson:"created_at"`      // 会话创建时间
+	LastMessageAt time.Time          `bson:"last_message_at"` // 最新消息时间
+	MessageCount  int                `bson:"message_count"`   // 消息总数
+	Messages      []Message          `bson:"messages"`        // 消息数组
+	IsDeleted     bool               `bson:"is_deleted"`      // 软删除标记
+}
+
+// HistoryMessage 历史消息结构（用于返回给调用方，保持兼容性）
+type HistoryMessage struct {
+	ID      uint   // 兼容性字段，实际使用MID
+	Role    string // 对应SenderID
+	Content string
+}
+
+// Conversation 对话结构（兼容性，映射到Session）
 type Conversation struct {
-	ID        uint   `gorm:"primaryKey;autoIncrement"`
-	Name      string `gorm:"not null"`
-	CreatedAt string `gorm:"type:text;not null"`
-	IsDeleted bool   `gorm:"default:0;not null"` // 软删除标记
+	ID        primitive.ObjectID
+	Name      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	IsDeleted bool
 }
 
-// TableName 指定表名
-func (Conversation) TableName() string {
-	return "conversations"
-}
+var client *mongo.Client
+var database *mongo.Database
+var sessionsCollection *mongo.Collection
+var wordsCollection *mongo.Collection
+var sentencesCollection *mongo.Collection
+var currentSessionID primitive.ObjectID
 
-// ChatMessage 聊天消息模型
-type ChatMessage struct {
-	ID        uint   `gorm:"primaryKey;autoIncrement"`
-	Role      string `gorm:"not null"`
-	Content   string `gorm:"not null;type:text"`
-	CreatedAt string `gorm:"type:text;not null"`
-	IsDeleted bool   `gorm:"default:0;not null"` // 软删除标记
-}
+const (
+	DatabaseName             = "chat_assistant"
+	SessionsCollection       = "sessions"
+	WordsCollection          = "words"
+	SentencesCollection      = "sentences"
+	DefaultConnectionTimeout = 10 * time.Second
+)
 
-var db *gorm.DB
-var currentConversationID uint = 0
+// InitDB 初始化MongoDB连接
+func InitDB(connectionString string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultConnectionTimeout)
+	defer cancel()
 
-// InitDB 初始化数据库连接
-func InitDB(dbPath string) error {
+	if connectionString == "" {
+		connectionString = "mongodb://localhost:27017"
+	}
+
 	var err error
-	db, err = gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	client, err = mongo.Connect(ctx, options.Client().ApplyURI(connectionString))
 	if err != nil {
-		return fmt.Errorf("打开数据库失败: %v", err)
+		return fmt.Errorf("连接MongoDB失败: %v", err)
 	}
 
-	// 自动迁移表结构
-	err = db.AutoMigrate(&Conversation{})
-	if err != nil {
-		return fmt.Errorf("迁移对话表结构失败: %v", err)
+	if err = client.Ping(ctx, nil); err != nil {
+		return fmt.Errorf("MongoDB连接测试失败: %v", err)
 	}
 
-	// 如果没有对话，创建默认对话
-	var count int64
-	db.Model(&Conversation{}).Where("is_deleted = ?", false).Count(&count)
+	database = client.Database(DatabaseName)
+	sessionsCollection = database.Collection(SessionsCollection)
+	wordsCollection = database.Collection(WordsCollection)
+	sentencesCollection = database.Collection(SentencesCollection)
+
+	if err := createIndexes(); err != nil {
+		return fmt.Errorf("创建索引失败: %v", err)
+	}
+
+	if err := initializeDefaultSession(); err != nil {
+		return fmt.Errorf("初始化默认会话失败: %v", err)
+	}
+
+	return nil
+}
+
+// createIndexes 创建必要的索引
+func createIndexes() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	indexes := []mongo.IndexModel{
+		{
+			Keys: bson.D{{Key: "is_deleted", Value: 1}, {Key: "last_message_at", Value: -1}},
+		},
+		{
+			Keys: bson.D{{Key: "participants", Value: 1}, {Key: "type", Value: 1}},
+		},
+		{
+			Keys: bson.D{{Key: "name", Value: "text"}},
+		},
+	}
+
+	_, err := sessionsCollection.Indexes().CreateMany(ctx, indexes)
+	if err != nil {
+		return fmt.Errorf("创建索引失败: %v", err)
+	}
+
+	return nil
+}
+
+// initializeDefaultSession 初始化默认会话
+func initializeDefaultSession() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	count, err := sessionsCollection.CountDocuments(ctx, bson.M{"is_deleted": false})
+	if err != nil {
+		return fmt.Errorf("查询会话数量失败: %v", err)
+	}
+
 	if count == 0 {
 		conv, err := CreateConversation("新对话")
 		if err != nil {
 			return fmt.Errorf("创建默认对话失败: %v", err)
 		}
-		currentConversationID = conv.ID
+		currentSessionID = conv.ID
 	} else {
-		// 加载第一个对话
-		var firstConv Conversation
-		db.Where("is_deleted = ?", false).Order("created_at ASC").First(&firstConv)
-		currentConversationID = firstConv.ID
-		// 确保该对话的消息表存在
-		ensureMessageTable(currentConversationID)
+		var session Session
+		opts := options.FindOne().SetSort(bson.M{"last_message_at": -1})
+		err := sessionsCollection.FindOne(ctx, bson.M{"is_deleted": false}, opts).Decode(&session)
+		if err != nil {
+			return fmt.Errorf("加载会话失败: %v", err)
+		}
+		currentSessionID = session.ID
 	}
 
 	return nil
@@ -71,216 +155,266 @@ func InitDB(dbPath string) error {
 
 // CloseDB 关闭数据库连接
 func CloseDB() error {
-	sqlDB, err := db.DB()
-	if err != nil {
-		return err
+	if client == nil {
+		return nil
 	}
-	return sqlDB.Close()
-}
-
-// ensureMessageTable 确保对话的消息表存在
-func ensureMessageTable(conversationID uint) error {
-	tableName := fmt.Sprintf("messages_%d", conversationID)
-
-	// 使用原生SQL创建表
-	sql := fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			role TEXT NOT NULL,
-			content TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			is_deleted INTEGER NOT NULL DEFAULT 0
-		)
-	`, tableName)
-
-	return db.Exec(sql).Error
-}
-
-// GetCurrentConversationID 获取当前对话ID
-func GetCurrentConversationID() uint {
-	return currentConversationID
-}
-
-// SetCurrentConversationID 设置当前对话ID
-func SetCurrentConversationID(id uint) error {
-	// 确保该对话的消息表存在
-	if err := ensureMessageTable(id); err != nil {
-		return fmt.Errorf("确保消息表存在失败: %v", err)
-	}
-	currentConversationID = id
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return client.Disconnect(ctx)
 }
 
 // CreateConversation 创建新对话
 func CreateConversation(name string) (*Conversation, error) {
-	conv := Conversation{
-		Name:      name,
-		CreatedAt: time.Now().Format("2006-01-02 15:04:05"),
-		IsDeleted: false,
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	now := time.Now()
+	session := &Session{
+		ID:            primitive.NewObjectID(),
+		Type:          "bot",
+		Name:          name,
+		Participants:  []string{"user", "assistant"},
+		CreatedAt:     now,
+		LastMessageAt: now,
+		MessageCount:  0,
+		Messages:      []Message{},
+		IsDeleted:     false,
 	}
 
-	result := db.Create(&conv)
-	if result.Error != nil {
-		return nil, fmt.Errorf("创建对话失败: %v", result.Error)
+	_, err := sessionsCollection.InsertOne(ctx, session)
+
+	if err != nil {
+		return nil, fmt.Errorf("创建对话失败: %v", err)
 	}
 
-	// 创建该对话的消息表
-	if err := ensureMessageTable(conv.ID); err != nil {
-		return nil, fmt.Errorf("创建消息表失败: %v", err)
-	}
-
-	return &conv, nil
+	return &Conversation{
+		ID:        session.ID,
+		Name:      session.Name,
+		CreatedAt: session.CreatedAt,
+		UpdatedAt: session.LastMessageAt,
+		IsDeleted: session.IsDeleted,
+	}, nil
 }
 
 // GetAllConversations 获取所有对话
 func GetAllConversations() ([]Conversation, error) {
-	var conversations []Conversation
-	result := db.Where("is_deleted = ?", false).Order("created_at DESC").Find(&conversations)
-	if result.Error != nil {
-		return nil, fmt.Errorf("查询对话失败: %v", result.Error)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	filter := bson.M{"is_deleted": false}
+	opts := options.Find().SetSort(bson.M{"last_message_at": -1})
+
+	cursor, err := sessionsCollection.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, fmt.Errorf("查询对话失败: %v", err)
 	}
+	defer cursor.Close(ctx)
+
+	var sessions []Session
+	if err = cursor.All(ctx, &sessions); err != nil {
+		return nil, fmt.Errorf("解析对话数据失败: %v", err)
+	}
+
+	conversations := make([]Conversation, len(sessions))
+	for i, session := range sessions {
+		conversations[i] = Conversation{
+			ID:        session.ID,
+			Name:      session.Name,
+			CreatedAt: session.CreatedAt,
+			UpdatedAt: session.LastMessageAt,
+			IsDeleted: session.IsDeleted,
+		}
+	}
+
 	return conversations, nil
 }
 
-// DeleteConversation 软删除对话
-func DeleteConversation(id uint) error {
-	result := db.Model(&Conversation{}).Where("id = ?", id).Update("is_deleted", true)
-	if result.Error != nil {
-		return fmt.Errorf("删除对话失败: %v", result.Error)
-	}
-	return nil
-}
+// DeleteConversation 通过ObjectID软删除对话
+func DeleteConversation(id primitive.ObjectID) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-// UpdateConversationName 更新对话名称
-func UpdateConversationName(id uint, name string) error {
-	result := db.Model(&Conversation{}).Where("id = ?", id).Update("name", name)
-	if result.Error != nil {
-		return fmt.Errorf("更新对话名称失败: %v", result.Error)
-	}
-	return nil
-}
+	filter := bson.M{"_id": id}
+	update := bson.M{"$set": bson.M{"is_deleted": true}}
 
-// SaveMessage 保存消息到数据库，返回消息ID
-func SaveMessage(role, content string) (uint, error) {
-	if currentConversationID == 0 {
-		return 0, fmt.Errorf("当前没有选中的对话")
+	result, err := sessionsCollection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("删除对话失败: %v", err)
 	}
 
-	// 确保消息表存在
-	if err := ensureMessageTable(currentConversationID); err != nil {
-		return 0, fmt.Errorf("确保消息表存在失败: %v", err)
-	}
-
-	tableName := fmt.Sprintf("messages_%d", currentConversationID)
-
-	msg := ChatMessage{
-		Role:      role,
-		Content:   content,
-		CreatedAt: time.Now().Format("2006-01-02 15:04:05"),
-		IsDeleted: false,
-	}
-
-	// 使用原生SQL插入
-	sql := fmt.Sprintf(`
-		INSERT INTO %s (role, content, created_at, is_deleted) 
-		VALUES (?, ?, ?, ?)
-	`, tableName)
-
-	result := db.Exec(sql, msg.Role, msg.Content, msg.CreatedAt, msg.IsDeleted)
-	if result.Error != nil {
-		return 0, fmt.Errorf("保存消息失败: %v", result.Error)
-	}
-
-	// 获取插入的ID
-	var id uint
-	db.Raw("SELECT last_insert_rowid()").Scan(&id)
-
-	return id, nil
-}
-
-// DeleteMessage 软删除单条消息
-func DeleteMessage(messageID uint) error {
-	if currentConversationID == 0 {
-		return fmt.Errorf("当前没有选中的对话")
-	}
-
-	tableName := fmt.Sprintf("messages_%d", currentConversationID)
-	sql := fmt.Sprintf("UPDATE %s SET is_deleted = ? WHERE id = ?", tableName)
-
-	result := db.Exec(sql, true, messageID)
-	if result.Error != nil {
-		return fmt.Errorf("删除消息失败: %v", result.Error)
+	if result.MatchedCount == 0 {
+		return fmt.Errorf("对话不存在")
 	}
 
 	return nil
 }
 
-// HistoryMessage 历史消息结构
-type HistoryMessage struct {
-	ID      uint
-	Role    string
-	Content string
+// UpdateConversationName 通过ObjectID更新对话名称
+func UpdateConversationName(id primitive.ObjectID, name string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	filter := bson.M{"_id": id}
+	update := bson.M{"$set": bson.M{"name": name}}
+
+	result, err := sessionsCollection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("更新对话名称失败: %v", err)
+	}
+
+	if result.MatchedCount == 0 {
+		return fmt.Errorf("对话不存在")
+	}
+
+	return nil
 }
 
-// LoadHistoryMessages 从数据库加载历史消息（只加载未删除的记录）
-func LoadHistoryMessages() ([]HistoryMessage, error) {
-	if currentConversationID == 0 {
-		return []HistoryMessage{}, nil
+// GetCurrentConversationID 获取当前对话的ObjectID
+func GetCurrentConversationID() primitive.ObjectID {
+	return currentSessionID
+}
+
+// SetCurrentConversationID 设置当前对话ObjectID
+func SetCurrentConversationID(id primitive.ObjectID) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	count, err := sessionsCollection.CountDocuments(ctx, bson.M{
+		"_id":        id,
+		"is_deleted": false,
+	})
+	if err != nil {
+		return fmt.Errorf("验证对话存在性失败: %v", err)
 	}
 
-	// 确保表存在
-	if err := ensureMessageTable(currentConversationID); err != nil {
-		return []HistoryMessage{}, nil // 表不存在时返回空列表
+	if count == 0 {
+		return fmt.Errorf("对话不存在或已被删除")
 	}
 
-	tableName := fmt.Sprintf("messages_%d", currentConversationID)
+	currentSessionID = id
+	return nil
+}
 
-	// 使用原生SQL查询
-	type MessageRow struct {
-		ID        uint
-		Role      string
-		Content   string
-		CreatedAt string
-		IsDeleted bool
-	}
+// GetConversationByObjectID 通过ObjectID获取对话
+func GetConversationByObjectID(id primitive.ObjectID) (*Conversation, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	var rows []MessageRow
-	sql := fmt.Sprintf("SELECT id, role, content, created_at, is_deleted FROM %s WHERE is_deleted = ? ORDER BY created_at ASC", tableName)
-	result := db.Raw(sql, false).Scan(&rows)
-	if result.Error != nil {
-		// 如果表不存在，返回空列表而不是错误
-		if strings.Contains(result.Error.Error(), "no such table") {
-			return []HistoryMessage{}, nil
+	var session Session
+	filter := bson.M{"_id": id, "is_deleted": false}
+
+	err := sessionsCollection.FindOne(ctx, filter).Decode(&session)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, fmt.Errorf("对话不存在")
 		}
-		return nil, fmt.Errorf("查询消息失败: %v", result.Error)
+		return nil, fmt.Errorf("查询对话失败: %v", err)
 	}
 
-	// 转换为返回格式
-	history := make([]HistoryMessage, len(rows))
-	for i, row := range rows {
-		history[i] = HistoryMessage{
-			ID:      row.ID,
-			Role:    row.Role,
-			Content: row.Content,
+	return &Conversation{
+		ID:        session.ID,
+		Name:      session.Name,
+		CreatedAt: session.CreatedAt,
+		UpdatedAt: session.LastMessageAt,
+		IsDeleted: session.IsDeleted,
+	}, nil
+}
+
+// SearchConversations 搜索对话
+func SearchConversations(keyword string, limit int) ([]Conversation, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	filter := bson.M{
+		"is_deleted": false,
+		"$or": []bson.M{
+			{"name": bson.M{"$regex": keyword, "$options": "i"}},
+			{"messages.content": bson.M{"$regex": keyword, "$options": "i"}},
+		},
+	}
+
+	opts := options.Find().
+		SetSort(bson.M{"last_message_at": -1}).
+		SetLimit(int64(limit))
+
+	cursor, err := sessionsCollection.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, fmt.Errorf("搜索对话失败: %v", err)
+	}
+	defer cursor.Close(ctx)
+
+	var sessions []Session
+	if err = cursor.All(ctx, &sessions); err != nil {
+		return nil, fmt.Errorf("解析搜索结果失败: %v", err)
+	}
+
+	conversations := make([]Conversation, len(sessions))
+	for i, session := range sessions {
+		conversations[i] = Conversation{
+			ID:        session.ID,
+			Name:      session.Name,
+			CreatedAt: session.CreatedAt,
+			UpdatedAt: session.LastMessageAt,
+			IsDeleted: session.IsDeleted,
 		}
 	}
 
-	return history, nil
+	return conversations, nil
 }
 
-// ClearAllMessages 软删除当前对话的所有聊天记录
-func ClearAllMessages() error {
-	if currentConversationID == 0 {
-		return fmt.Errorf("当前没有选中的对话")
+// GetConversationStats 获取对话统计信息
+func GetConversationStats() (map[string]interface{}, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	sessionCount, err := sessionsCollection.CountDocuments(ctx, bson.M{"is_deleted": false})
+	if err != nil {
+		return nil, fmt.Errorf("统计会话数量失败: %v", err)
 	}
 
-	tableName := fmt.Sprintf("messages_%d", currentConversationID)
-	sql := fmt.Sprintf("UPDATE %s SET is_deleted = ? WHERE is_deleted = ?", tableName)
-
-	result := db.Exec(sql, true, false)
-	if result.Error != nil {
-		return fmt.Errorf("清除消息失败: %v", result.Error)
+	// 统计总消息数
+	pipeline := []bson.M{
+		{"$match": bson.M{"is_deleted": false}},
+		{"$project": bson.M{"message_count": 1}},
+		{"$group": bson.M{
+			"_id":            nil,
+			"total_messages": bson.M{"$sum": "$message_count"},
+		}},
 	}
 
-	return nil
+	cursor, err := sessionsCollection.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, fmt.Errorf("统计消息数量失败: %v", err)
+	}
+	defer cursor.Close(ctx)
+
+	var result struct {
+		TotalMessages int `bson:"total_messages"`
+	}
+	if cursor.Next(ctx) {
+		cursor.Decode(&result)
+	}
+
+	return map[string]interface{}{
+		"total_conversations":     sessionCount,
+		"total_messages":          result.TotalMessages,
+		"current_conversation_id": currentSessionID.Hex(),
+	}, nil
+}
+
+// GetSessionByObjectID 获取完整的会话信息（包含所有消息）
+func GetSessionByObjectID(id primitive.ObjectID) (*Session, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var session Session
+	err := sessionsCollection.FindOne(ctx, bson.M{"_id": id}).Decode(&session)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, fmt.Errorf("会话不存在")
+		}
+		return nil, fmt.Errorf("查询会话失败: %v", err)
+	}
+
+	return &session, nil
 }

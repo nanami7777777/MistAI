@@ -3,19 +3,19 @@ package service
 import (
 	"Mist/database"
 	"fmt"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-// ConversationService handles conversation-related operations
 type ConversationService struct{}
 
-// NewConversationService creates a new ConversationService instance
 func NewConversationService() *ConversationService {
 	return &ConversationService{}
 }
 
 // Conversation represents a chat conversation
 type Conversation struct {
-	ID   uint
+	ID   primitive.ObjectID
 	Name string
 }
 
@@ -51,16 +51,16 @@ func (s *ConversationService) GetAllConversations() ([]Conversation, error) {
 }
 
 // DeleteConversation deletes a conversation by ID
-func (s *ConversationService) DeleteConversation(id uint) error {
+func (s *ConversationService) DeleteConversation(id primitive.ObjectID) error {
 	return database.DeleteConversation(id)
 }
 
 // SwitchConversation switches to a different conversation
-func (s *ConversationService) SwitchConversation(convID uint) error {
+func (s *ConversationService) SwitchConversation(convID primitive.ObjectID) error {
 	return database.SetCurrentConversationID(convID)
 }
 
 // GetCurrentConversationID gets the current conversation ID
-func (s *ConversationService) GetCurrentConversationID() uint {
+func (s *ConversationService) GetCurrentConversationID() primitive.ObjectID {
 	return database.GetCurrentConversationID()
 }

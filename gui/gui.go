@@ -2,8 +2,10 @@ package gui
 
 import (
 	mywidget "Mist/MyWidget"
+	"Mist/database"
 	"Mist/service"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,10 +13,12 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/atotto/clipboard"
 	hook "github.com/robotn/gohook"
 	log "github.com/sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 var (
@@ -24,7 +28,9 @@ var (
 	chatList                  *fyne.Container
 	scroll                    *container.Scroll
 	conversationList          *fyne.Container
-	currentConvID             uint
+	historyList               *widget.List               // 新增：历史记录列表
+	dictionaryEntries         []database.DictionaryEntry // 新增：用于存储单词条目
+	historyTooltipContent     *widget.RichText
 	mainWindow                fyne.Window
 	messageService            *service.MessageService
 	conversationService       *service.ConversationService
@@ -33,58 +39,20 @@ var (
 	currentStreamingContainer *fyne.Container
 )
 
-// Global map to store message metadata for efficient lookup
-var messageMetadata = make(map[*fyne.Container]MessageMetadata)
-var metadataMu sync.RWMutex
+func createMainLayout(convListContainer, chatArea, historyView fyne.CanvasObject) fyne.CanvasObject {
+	// 将聊天区域和历史记录视图放在一个水平分割器中
+	rightSplit := container.NewHSplit(chatArea, historyView)
+	rightSplit.SetOffset(0.7) // 聊天区域占70%
 
-// MessageMetadata stores metadata for a message widget
-type MessageMetadata struct {
-	ID      uint
-	Sender  string
-	Content string
+	// 将左侧的对话列表和右侧的分割器放在另一个水平分割器中
+	mainSplit := container.NewHSplit(convListContainer, rightSplit)
+	mainSplit.SetOffset(0.14) // 对话列表占比进一步调小
+
+	return mainSplit
 }
 
-// Run 启动并运行 Fyne GUI
-func Run() {
-	// Initialize services
-	messageService = service.NewMessageService()
-	conversationService = service.NewConversationService()
-	configService = service.NewConfigService()
-
-	// Set up event handlers
-	messageService.SetMessageEventHandler(handleMessageEvent)
-
-	// 获取当前对话ID（由 conversation service 管理）
-	currentConvID = conversationService.GetCurrentConversationID()
-
-	myApp := app.New()
-	w := myApp.NewWindow("AI 助手")
-	mainWindow = w
-
-	// 创建对话列表容器
-	conversationList = container.NewVBox()
-	// 异步加载并显示对话列表
-	refreshConversationListAsync()
-
-	// 对话列表的滚动容器
-	convScroll := container.NewVScroll(conversationList)
-	convScroll.SetMinSize(fyne.NewSize(200, 300))
-
-	// 新建对话按钮
-	newConvBtn := widget.NewButton("新建对话", func() {
-		conv, err := conversationService.CreateConversation("新对话")
-		if err != nil {
-			showError("创建对话失败", err)
-			return
-		}
-		switchConversation(conv.ID)
-	})
-
-	convListContainer := container.NewBorder(newConvBtn, nil, nil, nil, convScroll)
-
-	// 聊天区
+func createChatArea() fyne.CanvasObject {
 	chatList = container.NewVBox()
-	// 异步加载消息
 	loadCurrentConversationMessagesAsync()
 
 	scroll = container.NewVScroll(chatList)
@@ -93,34 +61,40 @@ func Run() {
 	entry = mywidget.NewMyMultiLine(sendMessage)
 	entry.SetPlaceHolder("输入问题…")
 
-	// 清除聊天记录按钮
-	clearBtn := widget.NewButton("清除记录", func() {
-		if err := messageService.ClearAllMessages(); err != nil {
-			showError("清除记录失败", err)
-			return
-		}
-		mu.Lock()
-		messages = []service.Message{}
-		mu.Unlock()
-		chatList.RemoveAll()
-		chatList.Refresh()
+	stopBtn := widget.NewButton("停止输出", func() {
+		messageService.StopStreaming()
 	})
 
 	settingsBtn := widget.NewButton("⚙", showSettingsDialog)
 	settingsBtn.Importance = widget.MediumImportance
 
 	topBar := container.NewBorder(nil, nil, nil, settingsBtn, widget.NewLabel(""))
-	bottomButtons := container.NewHBox(clearBtn)
+	bottomButtons := container.NewHBox(stopBtn)
 	bottom := container.NewBorder(nil, nil, nil, bottomButtons, entry)
 
-	chatArea := container.NewBorder(topBar, bottom, nil, nil, scroll)
-	content := container.NewHSplit(convListContainer, chatArea)
-	content.SetOffset(0.25)
+	return container.NewBorder(topBar, bottom, nil, nil, scroll)
+}
 
-	w.SetContent(content)
-	w.Resize(fyne.NewSize(800, 600))
+func createConversationList() fyne.CanvasObject {
+	conversationList = container.NewVBox()
+	refreshConversationListAsync()
 
-	//热键检测
+	convScroll := container.NewVScroll(conversationList)
+	convScroll.SetMinSize(fyne.NewSize(140, 300))
+
+	newConvBtn := widget.NewButton("+", func() {
+		conv, err := conversationService.CreateConversation("新对话")
+		if err != nil {
+			showError("创建对话失败", err)
+			return
+		}
+		switchConversation(conv.ID)
+	})
+
+	return container.NewBorder(newConvBtn, nil, nil, nil, convScroll)
+}
+
+func setupHotKeys(w fyne.Window) {
 	hook.Register(hook.KeyDown, []string{"ctrl", "c"}, func(e hook.Event) {
 		txt, err := clipboard.ReadAll()
 		if err != nil {
@@ -136,14 +110,292 @@ func Run() {
 			w.RequestFocus()
 		})
 	})
-	// 启动 hook 消息循环
+
 	go func() {
 		s := hook.Start()
 		<-hook.Process(s)
 	}()
-	defer hook.End()
+}
+
+// Run 启动并运行 Fyne GUI
+func Run() {
+	// Initialize services
+	messageService = service.NewMessageService()
+	conversationService = service.NewConversationService()
+	configService = service.NewConfigService()
+
+	// Set up event handlers
+	messageService.SetMessageEventHandler(handleMessageEvent)
+
+	myApp := app.New()
+	w := myApp.NewWindow("AI 助手")
+	mainWindow = w
+
+	convListContainer := createConversationList()
+	chatArea := createChatArea()
+	historyView := createHistoryView() // 创建历史记录视图
+	content := createMainLayout(convListContainer, chatArea, historyView)
+
+	w.SetContent(content)
+	w.Resize(fyne.NewSize(1200, 800)) // 调整窗口大小以容纳新视图
+
+	setupHotKeys(w)
 
 	w.ShowAndRun()
+}
+
+func createHistoryView() fyne.CanvasObject {
+	historyList = widget.NewList(
+		func() int {
+			return len(dictionaryEntries)
+		},
+		func() fyne.CanvasObject {
+			// 使用 mywidget.NewHoverableLabel 创建列表项
+			return mywidget.NewHoverableLabel("template")
+		},
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			// 类型断言为 *mywidget.HoverableLabel
+			label := o.(*mywidget.HoverableLabel)
+			index := int(i)
+			if index < 0 || index >= len(dictionaryEntries) {
+				label.SetText("")
+				label.OnHoverIn = nil
+				label.OnHoverOut = nil
+				label.OnDoubleTapped = nil
+				return
+			}
+			entry := dictionaryEntries[index]
+			label.SetText(entry.EnglishWord)
+
+			// 设置悬停事件
+			label.OnHoverIn = func() {
+				showHistoryDetails(index)
+			}
+
+			label.OnHoverOut = func() {
+				hideHistoryDetails(index)
+			}
+
+			// 设置双击事件
+			label.OnDoubleTapped = func() {
+				if index < 0 || index >= len(dictionaryEntries) {
+					return
+				}
+				currentEntry := dictionaryEntries[index]
+				if err := database.DeleteDictionaryEntry(currentEntry.EnglishWord); err != nil {
+					showError("删除单词失败", err)
+					return
+				}
+				refreshHistoryView()
+			}
+		},
+	)
+
+	if historyTooltipContent == nil {
+		historyTooltipContent = widget.NewRichText()
+		historyTooltipContent.Wrapping = fyne.TextWrapWord
+	}
+	detailScroll := container.NewVScroll(historyTooltipContent)
+	detailScroll.SetMinSize(fyne.NewSize(200, 150))
+	split := container.NewVSplit(historyList, detailScroll)
+	split.SetOffset(0.6)
+
+	refreshHistoryView()
+
+	return split
+}
+
+func refreshHistoryView() {
+	entries, err := database.GetAllDictionaryEntries()
+	if err != nil {
+		showError("获取历史记录失败", err)
+		return
+	}
+	dictionaryEntries = entries
+	historyList.Refresh()
+}
+
+func buildDictionaryEntryDetails(entry database.DictionaryEntry) string {
+	var b strings.Builder
+	for _, posEntry := range entry.PosEntries {
+		b.WriteString("词性: ")
+		b.WriteString(posEntry.Pos)
+		b.WriteString("\n")
+		for _, sense := range posEntry.Senses {
+			b.WriteString("  释义: ")
+			b.WriteString(sense.Meaning)
+			b.WriteString("\n")
+			for _, example := range sense.Examples {
+				b.WriteString("    例句: ")
+				b.WriteString(example.Sentence)
+				b.WriteString(" - ")
+				b.WriteString(example.Translation)
+				b.WriteString("\n")
+			}
+		}
+	}
+	return b.String()
+}
+
+func showHistoryDetails(index int) {
+	if index < 0 || index >= len(dictionaryEntries) {
+		return
+	}
+	entry := dictionaryEntries[index]
+	if historyTooltipContent == nil {
+		historyTooltipContent = widget.NewRichText()
+		historyTooltipContent.Wrapping = fyne.TextWrapWord
+	}
+	var segments []widget.RichTextSegment
+
+	if entry.EnglishWord != "" {
+		segments = append(segments, &widget.TextSegment{
+			Text: entry.EnglishWord ,
+			Style: widget.RichTextStyle{
+				ColorName: theme.ColorNamePrimary,
+				SizeName:  theme.SizeNameSubHeadingText,
+				TextStyle: fyne.TextStyle{Bold: true},
+			},
+		})
+	}
+
+	for _, posEntry := range entry.PosEntries {
+		segments = append(segments, &widget.TextSegment{
+			Text: "词性: ",
+			Style: widget.RichTextStyle{
+				ColorName: theme.ColorNameForeground,
+				TextStyle: fyne.TextStyle{Bold: true},
+				Inline:    true,
+			},
+		})
+		segments = append(segments, &widget.TextSegment{
+			Text: posEntry.Pos ,
+			Style: widget.RichTextStyle{
+				ColorName: theme.ColorNamePrimary,
+				TextStyle: fyne.TextStyle{Bold: true},
+			},
+		})
+
+		for i, sense := range posEntry.Senses {
+			segments = append(segments, &widget.TextSegment{
+				Text: fmt.Sprintf("  %d. 释义: ", i+1),
+				Style: widget.RichTextStyle{
+					ColorName: theme.ColorNameForeground,
+					TextStyle: fyne.TextStyle{Bold: true},
+				},
+			})
+			segments = append(segments, &widget.TextSegment{
+				Text: sense.Meaning ,
+				Style: widget.RichTextStyle{
+					ColorName: theme.ColorNameForeground,
+				},
+			})
+
+			for _, example := range sense.Examples {
+				segments = append(segments, &widget.TextSegment{
+					Text: "    例句: ",
+					Style: widget.RichTextStyle{
+						ColorName: theme.ColorNamePrimary,
+						TextStyle: fyne.TextStyle{Bold: true},
+					},
+				})
+				segments = append(segments, &widget.TextSegment{
+					Text: example.Sentence ,
+					Style: widget.RichTextStyle{
+						ColorName: theme.ColorNameHyperlink,
+						TextStyle: fyne.TextStyle{Italic: true},
+					},
+				})
+
+				segments = append(segments, &widget.TextSegment{
+					Text: "    译文: ",
+					Style: widget.RichTextStyle{
+						ColorName: theme.ColorNamePrimary,
+						TextStyle: fyne.TextStyle{Bold: true},
+					},
+				})
+				segments = append(segments, &widget.TextSegment{
+					Text: example.Translation ,
+					Style: widget.RichTextStyle{
+						ColorName: theme.ColorNameForeground,
+					},
+				})
+			}
+		}
+	}
+
+	if len(segments) == 0 {
+		segments = append(segments, &widget.TextSegment{
+			Text: "暂无详细释义",
+			Style: widget.RichTextStyle{
+				ColorName: theme.ColorNameForeground,
+			},
+		})
+	}
+
+	historyTooltipContent.Segments = segments
+	historyTooltipContent.Refresh()
+}
+
+func hideHistoryDetails(index int) {
+}
+
+func handleUserMessageSent(event service.MessageEvent) {
+	if event.Message != nil {
+		appendMessage(chatList, "你", event.Message.Content, event.Message.ID)
+		entry.SetText("")
+		updateCurrentConversationTitleIfNeeded(event.Message.Content)
+	}
+}
+
+func handleAIResponseStart() {
+	// Create streaming message container
+	currentStreamingLabel = widget.NewLabel("AI:")
+	currentStreamingLabel.Wrapping = fyne.TextWrapWord
+	currentStreamingContainer = container.NewVBox(currentStreamingLabel)
+	chatList.Add(currentStreamingContainer)
+	scroll.ScrollToBottom()
+}
+
+func handleAIResponseChunk(event service.MessageEvent) {
+	// Update streaming content in real-time
+	if currentStreamingLabel != nil && event.Content != "" {
+		currentText := currentStreamingLabel.Text
+		if currentText == "AI:" || currentText == "AI: " {
+			currentStreamingLabel.SetText("AI:\n" + event.Content)
+		} else {
+			currentStreamingLabel.SetText(currentText + event.Content)
+		}
+		currentStreamingLabel.Refresh()
+		scroll.ScrollToBottom()
+	}
+}
+
+func handleAIResponseComplete(event service.MessageEvent) {
+	if event.Message != nil {
+		mu.Lock()
+		messages = append(messages, *event.Message)
+		mu.Unlock()
+
+		// Replace streaming container with final message
+		if currentStreamingContainer != nil {
+			// Remove streaming container
+			removeContainerFromList(chatList, currentStreamingContainer)
+			currentStreamingContainer = nil
+			currentStreamingLabel = nil
+		}
+
+		// Add final message with delete button
+		appendMessage(chatList, "AI", event.Message.Content, event.Message.ID)
+		scroll.ScrollToBottom()
+	}
+	refreshHistoryView()
+}
+
+func handleErrorEvent(event service.MessageEvent) {
+	if event.Error != nil {
+		dialog.ShowError(fmt.Errorf("发生错误: %v", event.Error), mainWindow)
+	}
 }
 
 // handleMessageEvent handles events from the message service
@@ -151,49 +403,59 @@ func handleMessageEvent(event service.MessageEvent) {
 	fyne.Do(func() {
 		switch event.Type {
 		case "user_message_sent":
-			if event.Message != nil {
-				appendMessage(chatList, "你", event.Message.Content, event.Message.ID)
-				entry.SetText("")
-			}
+			handleUserMessageSent(event)
 		case "ai_response_start":
-			// Create streaming message container
-			currentStreamingLabel = widget.NewLabel("AI: ")
-			currentStreamingLabel.Wrapping = fyne.TextWrapWord
-			currentStreamingContainer = container.NewVBox(currentStreamingLabel)
-			chatList.Add(currentStreamingContainer)
-			scroll.ScrollToBottom()
+			handleAIResponseStart()
 		case "ai_response_chunk":
-			// Update streaming content in real-time
-			if currentStreamingLabel != nil && event.Content != "" {
-				currentText := currentStreamingLabel.Text
-				currentStreamingLabel.SetText(currentText + event.Content)
-				currentStreamingLabel.Refresh()
-				scroll.ScrollToBottom()
-			}
+			handleAIResponseChunk(event)
 		case "ai_response_complete":
-			if event.Message != nil {
-				mu.Lock()
-				messages = append(messages, *event.Message)
-				mu.Unlock()
-
-				// Replace streaming container with final message
-				if currentStreamingContainer != nil {
-					// Remove streaming container
-					removeContainerFromList(chatList, currentStreamingContainer)
-					currentStreamingContainer = nil
-					currentStreamingLabel = nil
-				}
-
-				// Add final message with delete button
-				appendMessage(chatList, "AI", event.Message.Content, event.Message.ID)
-				scroll.ScrollToBottom()
-			}
+			handleAIResponseComplete(event)
 		case "error":
-			if event.Error != nil {
-				dialog.ShowError(fmt.Errorf("发生错误: %v", event.Error), mainWindow)
-			}
+			handleErrorEvent(event)
 		}
 	})
+}
+
+func generateConversationTitleFromMessage(content string) string {
+	text := strings.TrimSpace(content)
+	if text == "" {
+		return ""
+	}
+	if idx := strings.Index(text, "\n"); idx >= 0 {
+		text = text[:idx]
+	}
+	runes := []rune(text)
+	maxLen := 20
+	if len(runes) > maxLen {
+		text = string(runes[:maxLen]) + "..."
+	}
+	return text
+}
+
+func updateCurrentConversationTitleIfNeeded(content string) {
+	go func() {
+		convID := conversationService.GetCurrentConversationID()
+		if convID.IsZero() {
+			return
+		}
+		conv, err := database.GetConversationByObjectID(convID)
+		if err != nil {
+			log.Errorf("获取对话失败: %v", err)
+			return
+		}
+		if conv.Name != "新对话" {
+			return
+		}
+		title := generateConversationTitleFromMessage(content)
+		if title == "" {
+			return
+		}
+		if err := database.UpdateConversationName(convID, title); err != nil {
+			log.Errorf("更新对话名称失败: %v", err)
+			return
+		}
+		refreshConversationListAsync()
+	}()
 }
 
 // showError shows an error dialog
@@ -213,7 +475,6 @@ func refreshConversationListAsync() {
 func refreshConversationList() {
 
 	conversationList.RemoveAll()
-
 	conversations, err := conversationService.GetAllConversations()
 	if err != nil {
 		showError("加载对话列表失败", err)
@@ -225,59 +486,63 @@ func refreshConversationList() {
 	for _, conv := range conversations {
 		convID := conv.ID
 		convName := conv.Name
-		convBtn := widget.NewButton(convName, func(id uint) func() {
+		item := mywidget.NewConversationItem(convName, convID == currentID)
+
+		item.OnTapped = func(id primitive.ObjectID) func() {
 			return func() { switchConversation(id) }
-		}(convID))
+		}(convID)
 
-		if convID == currentID {
-			convBtn.Importance = widget.HighImportance
-		} else {
-			convBtn.Importance = widget.MediumImportance
-		}
-
-		deleteBtn := widget.NewButton("删除", func(id uint) func() {
-			return func() {
-				if id == currentID {
-					conversations, _ := conversationService.GetAllConversations()
-					found := false
-					for _, c := range conversations {
-						if c.ID != id {
-							switchConversation(c.ID)
-							found = true
-							break
-						}
+		item.OnRightTapped = func(id primitive.ObjectID) func(*fyne.PointEvent) {
+			return func(_ *fyne.PointEvent) {
+				dialog.ShowConfirm("删除对话", "确定要删除该对话吗？", func(ok bool) {
+					if !ok {
+						return
 					}
-					if !found {
-						newConv, err := conversationService.CreateConversation("新对话")
-						if err != nil {
-							showError("创建新对话失败", err)
-							return
-						}
-						switchConversation(newConv.ID)
-					}
-				}
-				if err := conversationService.DeleteConversation(id); err != nil {
-					showError("删除对话失败", err)
-					return
-				}
-				refreshConversationListAsync() // Also make this async
+					deleteConversation(id)
+				}, mainWindow)
 			}
-		}(convID))
+		}(convID)
 
-		convItem := container.NewBorder(nil, nil, nil, deleteBtn, convBtn)
-		conversationList.Add(convItem)
+		conversationList.Add(item)
 	}
 
 	conversationList.Refresh()
 }
 
+func deleteConversation(id primitive.ObjectID) {
+	if id == conversationService.GetCurrentConversationID() {
+		conversations, _ := conversationService.GetAllConversations()
+		found := false
+		for _, c := range conversations {
+			if c.ID != id {
+				switchConversation(c.ID)
+				found = true
+				break
+			}
+		}
+		if !found {
+			newConv, err := conversationService.CreateConversation("新对话")
+			if err != nil {
+				showError("创建新对话失败", err)
+				return
+			}
+			switchConversation(newConv.ID)
+		}
+	}
+	if err := conversationService.DeleteConversation(id); err != nil {
+		showError("删除对话失败", err)
+		return
+	}
+	refreshConversationListAsync()
+}
+
 // switchConversation 切换对话
-func switchConversation(convID uint) {
+func switchConversation(convID primitive.ObjectID) {
 	if err := conversationService.SwitchConversation(convID); err != nil {
 		showError("切换对话失败", err)
 		return
 	}
-	currentConvID = convID
+
 	loadCurrentConversationMessagesAsync() // Make this async
 	refreshConversationListAsync()         // Make this async
 }
@@ -329,48 +594,57 @@ func loadCurrentConversationMessages() {
 	}
 }
 
-// createMessageWithDeleteButton creates a message container with a delete button
-// Uses a shared delete handler with message ID to avoid creating closures in loops
-func createMessageWithDeleteButton(label *widget.Label, messageID uint) *fyne.Container {
+func createMessageWithDeleteButton(content fyne.CanvasObject, messageID uint) *fyne.Container {
 	deleteBtn := widget.NewButton("删除", func() {
 		handleDeleteMessage(messageID)
 	})
-	return container.NewBorder(nil, nil, nil, deleteBtn, label)
+	return container.NewBorder(nil, nil, nil, deleteBtn, content)
+}
+
+func normalizeMarkdownContent(s string) string {
+	if s == "" {
+		return s
+	}
+	s = strings.ReplaceAll(s, "\\r\\n", "\n")
+	s = strings.ReplaceAll(s, "\\n", "\n")
+	s = strings.ReplaceAll(s, "  \n", "\n\n")
+	return s
 }
 
 // appendMessage adds a new message to the chat list
 func appendMessage(chatList *fyne.Container, sender, content string, messageID uint) {
-	label := widget.NewLabel(sender + ": " + content)
-	label.Wrapping = fyne.TextWrapWord
+	header := widget.NewRichTextFromMarkdown("**" + sender + ":**")
+	body := widget.NewRichTextFromMarkdown(normalizeMarkdownContent(content))
+	messageContent := container.NewVBox(header, body)
 
-	messageRow := createMessageWithDeleteButton(label, messageID)
+	messageRow := createMessageWithDeleteButton(messageContent, messageID)
 	chatList.Add(messageRow)
 
 	// Store metadata for this message
-	metadataMu.Lock()
-	messageMetadata[messageRow] = MessageMetadata{
+	service.MetadataMu.Lock()
+	service.MessageMetadata[messageRow] = service.Metadata{
 		ID:      messageID,
 		Sender:  sender,
 		Content: content,
 	}
-	metadataMu.Unlock()
+	service.MetadataMu.Unlock()
 }
 
 // handleDeleteMessage handles deletion of a message by its ID
 func handleDeleteMessage(messageID uint) {
 	// Find the container and metadata associated with this message ID
 	var targetContainer *fyne.Container
-	var targetMetadata MessageMetadata
+	var targetMetadata service.Metadata
 
-	metadataMu.RLock()
-	for container, metadata := range messageMetadata {
+	service.MetadataMu.RLock()
+	for container, metadata := range service.MessageMetadata {
 		if metadata.ID == messageID {
 			targetContainer = container
 			targetMetadata = metadata
 			break
 		}
 	}
-	metadataMu.RUnlock()
+	service.MetadataMu.RUnlock()
 
 	if targetContainer == nil {
 		showError("删除消息失败", fmt.Errorf("未找到要删除的消息"))
@@ -401,9 +675,9 @@ func handleDeleteMessage(messageID uint) {
 	removeContainerFromList(chatList, targetContainer)
 
 	// Clean up metadata
-	metadataMu.Lock()
-	delete(messageMetadata, targetContainer)
-	metadataMu.Unlock()
+	service.MetadataMu.Lock()
+	delete(service.MessageMetadata, targetContainer)
+	service.MetadataMu.Unlock()
 }
 
 // removeContainerFromList removes a container from a list
@@ -428,38 +702,9 @@ func sendMessage() {
 		return
 	}
 
-	// Add user message to local messages array immediately
-	mu.Lock()
-	messages = append(messages, service.Message{Role: "user", Content: text})
-	mu.Unlock()
-
-	// Send message through service (non-blocking)
-	go func(userText string) {
-		req := service.SendMessageRequest{Content: userText}
-		// Create response channel for streaming
-		responseChan := make(chan string, 100)
-
-		// Start goroutine to handle streaming response
-		go func() {
-			for chunk := range responseChan {
-				// The service will handle forwarding chunks to the event handler
-				_ = chunk
-			}
-		}()
-
-		_, err := messageService.StreamMessage(req, responseChan)
-		if err != nil {
-			fyne.Do(func() {
-				showError("发送消息失败", err)
-				// Clean up streaming container on error
-				if currentStreamingContainer != nil {
-					removeContainerFromList(chatList, currentStreamingContainer)
-					currentStreamingContainer = nil
-					currentStreamingLabel = nil
-				}
-			})
-		}
-	}(text)
+	// The service now handles all the complexity of streaming, parsing, and storing.
+	// The GUI's role is just to initiate the request and then react to events.
+	go messageService.StreamMessage(service.SendMessageRequest{Content: text})
 }
 
 func showSettingsDialog() {

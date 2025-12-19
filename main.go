@@ -19,7 +19,8 @@ func main() {
 		return
 	}
 	// 初始化数据库
-	if err := database.InitDB("./chat.db"); err != nil {
+	cfg := config.GetConfig()
+	if err := database.InitDB(cfg.MongoDB.ConnectionString); err != nil {
 		fmt.Printf("数据库初始化失败: %v\n", err)
 		return
 	}

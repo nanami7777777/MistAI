@@ -129,14 +129,33 @@ func setupHotKeys(w fyne.Window) {
 			log.Println("读取剪贴板失败:", err)
 			return
 		}
-		fyne.Do(func() {
-			entry.SetText(txt)
-			w.Canvas().Focus(entry)
-			entry.Refresh()
-			w.Hide()
-			w.Show()
-			w.RequestFocus()
-		})
+		go func() {
+			startTime := time.Now()
+			timeout := 3 * time.Second
+			fyne.Do(func() {
+				entry.SetText(txt)
+				entry.Refresh()
+				w.Show()
+				w.RequestFocus()
+				w.Canvas().Focus(entry)
+			})
+			for {
+				if time.Since(startTime) > timeout {
+					break
+				}
+				fyne.Do(func() {
+					w.Show()
+					w.RequestFocus()
+					if w.Canvas().Focused() != entry {
+						w.Canvas().Focus(entry)
+					}
+				})
+				time.Sleep(50 * time.Millisecond)
+				if w.Canvas().Focused() == entry {
+					break
+				}
+			}
+		}()
 	})
 
 	go func() {

@@ -15,10 +15,11 @@ type MongoConfig struct {
 
 // AppConfig 应用配置结构
 type AppConfig struct {
-	APIKey  string      `json:"api_key"`
-	APIURL  string      `json:"api_url"`
-	Model   string      `json:"model"`
-	MongoDB MongoConfig `json:"mongodb"`
+	Provider string      `json:"provider"`
+	APIKey   string      `json:"api_key"`
+	APIURL   string      `json:"api_url"`
+	Model    string      `json:"model"`
+	MongoDB  MongoConfig `json:"mongodb"`
 }
 
 var (
@@ -32,9 +33,10 @@ func LoadConfig() (*AppConfig, error) {
 	// 如果配置文件不存在，创建默认配置
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		defaultConfig := &AppConfig{
-			APIKey: "cc8be4d98988431493a372bb7a39ff78.r3H7BoQMZ0hj8074",
-			APIURL: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-			Model:  "glm-4.5-flash",
+			Provider: "zhipu_glm",
+			APIKey:   "cc8be4d98988431493a372bb7a39ff78.r3H7BoQMZ0hj8074",
+			APIURL:   "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+			Model:    "glm-4.5-flash",
 			MongoDB: MongoConfig{
 				ConnectionString:  "mongodb://localhost:27017",
 				DatabaseName:      "chat_assistant",

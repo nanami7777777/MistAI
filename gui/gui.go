@@ -39,6 +39,34 @@ var (
 	currentStreamingContainer *fyne.Container
 )
 
+type providerOption struct {
+	Key          string
+	Label        string
+	DefaultURL   string
+	DefaultModel string
+}
+
+var providerOptions = []providerOption{
+	{
+		Key:          "zhipu_glm",
+		Label:        "智谱 GLM",
+		DefaultURL:   "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+		DefaultModel: "glm-4.5-flash",
+	},
+	{
+		Key:          "openai",
+		Label:        "OpenAI",
+		DefaultURL:   "https://api.openai.com/v1/chat/completions",
+		DefaultModel: "gpt-4.1-mini",
+	},
+	{
+		Key:          "custom",
+		Label:        "自定义/其他",
+		DefaultURL:   "",
+		DefaultModel: "",
+	},
+}
+
 func createMainLayout(convListContainer, chatArea, historyView fyne.CanvasObject) fyne.CanvasObject {
 	// 将聊天区域和历史记录视图放在一个水平分割器中
 	rightSplit := container.NewHSplit(chatArea, historyView)
@@ -250,7 +278,7 @@ func showHistoryDetails(index int) {
 
 	if entry.EnglishWord != "" {
 		segments = append(segments, &widget.TextSegment{
-			Text: entry.EnglishWord ,
+			Text: entry.EnglishWord,
 			Style: widget.RichTextStyle{
 				ColorName: theme.ColorNamePrimary,
 				SizeName:  theme.SizeNameSubHeadingText,
@@ -269,7 +297,7 @@ func showHistoryDetails(index int) {
 			},
 		})
 		segments = append(segments, &widget.TextSegment{
-			Text: posEntry.Pos ,
+			Text: posEntry.Pos,
 			Style: widget.RichTextStyle{
 				ColorName: theme.ColorNamePrimary,
 				TextStyle: fyne.TextStyle{Bold: true},
@@ -285,7 +313,7 @@ func showHistoryDetails(index int) {
 				},
 			})
 			segments = append(segments, &widget.TextSegment{
-				Text: sense.Meaning ,
+				Text: sense.Meaning,
 				Style: widget.RichTextStyle{
 					ColorName: theme.ColorNameForeground,
 				},
@@ -300,7 +328,7 @@ func showHistoryDetails(index int) {
 					},
 				})
 				segments = append(segments, &widget.TextSegment{
-					Text: example.Sentence ,
+					Text: example.Sentence,
 					Style: widget.RichTextStyle{
 						ColorName: theme.ColorNameHyperlink,
 						TextStyle: fyne.TextStyle{Italic: true},
@@ -315,7 +343,7 @@ func showHistoryDetails(index int) {
 					},
 				})
 				segments = append(segments, &widget.TextSegment{
-					Text: example.Translation ,
+					Text: example.Translation,
 					Style: widget.RichTextStyle{
 						ColorName: theme.ColorNameForeground,
 					},
@@ -720,6 +748,28 @@ func showSettingsDialog() {
 
 	settingsWindow := fyne.CurrentApp().NewWindow("设置")
 
+	providerLabels := make([]string, len(providerOptions))
+	for i, opt := range providerOptions {
+		providerLabels[i] = opt.Label
+	}
+
+	providerSelect := widget.NewSelect(providerLabels, nil)
+
+	currentProviderKey := cfg.Provider
+	if currentProviderKey == "" {
+		currentProviderKey = "zhipu_glm"
+	}
+
+	initialLabel := providerLabels[0]
+	for _, opt := range providerOptions {
+		if opt.Key == currentProviderKey {
+			initialLabel = opt.Label
+			break
+		}
+	}
+
+	providerSelect.SetSelected(initialLabel)
+
 	apiKeyEntry := widget.NewEntry()
 	apiKeyEntry.SetText(cfg.APIKey)
 	apiKeyEntry.SetPlaceHolder("请输入 API Key")
@@ -732,8 +782,23 @@ func showSettingsDialog() {
 	modelEntry.SetText(cfg.Model)
 	modelEntry.SetPlaceHolder("请输入模型名称")
 
+	providerSelect.OnChanged = func(label string) {
+		for _, opt := range providerOptions {
+			if opt.Label == label {
+				if opt.DefaultURL != "" {
+					apiURLEntry.SetText(opt.DefaultURL)
+				}
+				if opt.DefaultModel != "" {
+					modelEntry.SetText(opt.DefaultModel)
+				}
+				break
+			}
+		}
+	}
+
 	form := &widget.Form{
 		Items: []*widget.FormItem{
+			{Text: "API 类型", Widget: providerSelect},
 			{Text: "API Key", Widget: apiKeyEntry},
 			{Text: "API URL", Widget: apiURLEntry},
 			{Text: "Model", Widget: modelEntry},
@@ -752,7 +817,23 @@ func showSettingsDialog() {
 				return
 			}
 
-			newConfig := &service.AppConfig{APIKey: apiKeyEntry.Text, APIURL: apiURLEntry.Text, Model: modelEntry.Text}
+			selectedProviderKey := ""
+			for _, opt := range providerOptions {
+				if opt.Label == providerSelect.Selected {
+					selectedProviderKey = opt.Key
+					break
+				}
+			}
+			if selectedProviderKey == "" {
+				selectedProviderKey = "custom"
+			}
+
+			newConfig := &service.AppConfig{
+				Provider: selectedProviderKey,
+				APIKey:   apiKeyEntry.Text,
+				APIURL:   apiURLEntry.Text,
+				Model:    modelEntry.Text,
+			}
 			if err := configService.SaveConfig(newConfig); err != nil {
 				dialog.ShowError(fmt.Errorf("保存配置失败: %v", err), settingsWindow)
 				return

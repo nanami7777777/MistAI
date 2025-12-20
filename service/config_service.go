@@ -15,9 +15,10 @@ func NewConfigService() *ConfigService {
 
 // AppConfig represents application configuration
 type AppConfig struct {
-	APIKey string
-	APIURL string
-	Model  string
+	Provider string
+	APIKey   string
+	APIURL   string
+	Model    string
 }
 
 // GetConfig retrieves the current configuration
@@ -28,18 +29,20 @@ func (s *ConfigService) GetConfig() (*AppConfig, error) {
 	}
 
 	return &AppConfig{
-		APIKey: cfg.APIKey,
-		APIURL: cfg.APIURL,
-		Model:  cfg.Model,
+		Provider: cfg.Provider,
+		APIKey:   cfg.APIKey,
+		APIURL:   cfg.APIURL,
+		Model:    cfg.Model,
 	}, nil
 }
 
 // SaveConfig saves the configuration
 func (s *ConfigService) SaveConfig(cfg *AppConfig) error {
 	appCfg := &config.AppConfig{
-		APIKey: cfg.APIKey,
-		APIURL: cfg.APIURL,
-		Model:  cfg.Model,
+		Provider: cfg.Provider,
+		APIKey:   cfg.APIKey,
+		APIURL:   cfg.APIURL,
+		Model:    cfg.Model,
 	}
 
 	return config.SaveConfig(appCfg)

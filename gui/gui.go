@@ -398,7 +398,7 @@ func handleUserMessageSent(event service.MessageEvent) {
 func handleAIResponseStart() {
 	// Create streaming message container
 	currentStreamingLabel = widget.NewLabel("AI:")
-	currentStreamingLabel.Wrapping = fyne.TextWrapWord
+	currentStreamingLabel.Wrapping = fyne.TextWrapBreak
 	currentStreamingContainer = container.NewVBox(currentStreamingLabel)
 	chatList.Add(currentStreamingContainer)
 	scroll.ScrollToBottom()
@@ -662,6 +662,7 @@ func normalizeMarkdownContent(s string) string {
 func appendMessage(chatList *fyne.Container, sender, content string, messageID uint) {
 	header := widget.NewRichTextFromMarkdown("**" + sender + ":**")
 	body := widget.NewRichTextFromMarkdown(normalizeMarkdownContent(content))
+	body.Wrapping = fyne.TextWrapBreak
 	messageContent := container.NewVBox(header, body)
 
 	messageRow := createMessageWithDeleteButton(messageContent, messageID)

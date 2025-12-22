@@ -48,10 +48,10 @@ type providerOption struct {
 
 var providerOptions = []providerOption{
 	{
-		Key:          "zhipu_glm",
-		Label:        "智谱 GLM",
-		DefaultURL:   "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-		DefaultModel: "glm-4.5-flash",
+		Key:          "openrouter",
+		Label:        "OpenRouter",
+		DefaultURL:   "https://openrouter.ai/api/v1/chat/completions",
+		DefaultModel: "",
 	},
 	{
 		Key:          "openai",

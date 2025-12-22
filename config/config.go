@@ -33,10 +33,10 @@ func LoadConfig() (*AppConfig, error) {
 	// 如果配置文件不存在，创建默认配置
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		defaultConfig := &AppConfig{
-			Provider: "zhipu_glm",
-			APIKey:   "cc8be4d98988431493a372bb7a39ff78.r3H7BoQMZ0hj8074",
-			APIURL:   "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-			Model:    "glm-4.5-flash",
+			Provider: "custom",
+			APIKey:   "",
+			APIURL:   "",
+			Model:    "",
 			MongoDB: MongoConfig{
 				ConnectionString:  "mongodb://localhost:27017",
 				DatabaseName:      "chat_assistant",

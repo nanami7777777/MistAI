@@ -1,10 +1,11 @@
 {
-  "api_key": "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",
+  "provider": "zhipu_glm",
+  "api_key": "",
   "api_url": "https://openrouter.ai/api/v1/chat/completions",
-  "model": "tngtech/deepseek-r1t2-chimera:free",
+  "model": "xiaomi/mimo-v2-flash:free",
   "mongodb": {
-    "connection_string": "mongodb://localhost:27017",
-    "database_name": "chat_assistant",
-    "connection_timeout": 10
+    "connection_string": "",
+    "database_name": "",
+    "connection_timeout": 0
   }
 }

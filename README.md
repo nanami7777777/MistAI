@@ -1,6 +1,6 @@
 # MistAI 桌面 AI 助手
 
-MistAI 是一个基于 Go 与 Fyne 的本地桌面 AI 助手应用，支持调用兼容 OpenAI 的大语言模型接口（如 OpenAI、智谱 GLM、自定义 OpenAI 风格 API），并通过 MongoDB 持久化对话、词典与翻译记录。
+MistAI 是一个基于 Go 与 Fyne 的本地桌面 AI 助手应用，支持调用兼容 OpenAI 的大语言模型接口（如 OpenAI、OpenRouter、自定义 OpenAI 风格 API），并通过 MongoDB 持久化对话、词典与翻译记录。
 
 应用提供多会话管理、词典/翻译历史面板、全局快捷键、流式输出与可视化配置界面，适合作为日常问答、翻译与单词管理工具。
 
@@ -40,7 +40,7 @@ MistAI 是一个基于 Go 与 Fyne 的本地桌面 AI 助手应用，支持调�
   - 使用官方驱动 `go.mongodb.org/mongo-driver`
 - AI/LLM 调用
   - 自定义 `llm` 包封装聊天接口（`llm/llm.go:1`）
-  - 支持 OpenAI/智谱 GLM/自定义兼容 OpenAI 协议的 API
+  - 支持 OpenAI/OpenRouter/自定义兼容 OpenAI 协议的 API
 - 其他
   - `github.com/robotn/gohook`：全局快捷键监听（`gui/gui.go:125`）
   - `github.com/atotto/clipboard`：系统剪贴板访问（`gui/gui.go:127`）
@@ -96,17 +96,19 @@ MistAI 是一个基于 Go 与 Fyne 的本地桌面 AI 助手应用，支持调�
 字段说明：
 
 - `provider`：API 类型
-  - `"zhipu_glm"`：智谱 GLM（默认 URL 与模型已在 GUI 中预设，`gui/gui.go:27`）
   - `"openai"`：OpenAI 官方接口
-  - `"custom"`：自定义兼容 OpenAI 协议的第三方接口（如代理服务）
+  - `"openrouter"`：OpenRouter 接口（如 `https://openrouter.ai/api/v1/chat/completions`）
+  - `"custom"`：自定义兼容 OpenAI 协议的第三方接口（如代理服务、其他厂商 API）
 - `api_key`：你的模型服务 API Key（请不要将真实 Key 提交到版本库）
-- `api_url`：聊天接口地址，例如 OpenAI 或代理地址
-- `model`：使用的模型名称
+- `api_url`：聊天接口地址，例如 OpenAI、OpenRouter 或代理地址
+- `model`：使用的模型名称（如 `gpt-4.1-mini`、`xiaomi/mimo-v2-flash:free` 等）
 - `mongodb.connection_string`：MongoDB 连接字符串
 - `mongodb.database_name`：数据库名称
 - `mongodb.connection_timeout`：连接超时时间（秒）
 
 > 安全提示：仓库中的示例 `config.json` 仅用于本地开发，请务必替换为你自己的 Key，避免泄露到公共仓库。
+>
+> 说明：`config.json` 不会被编译进可执行文件，应用在运行时从当前工作目录读取该文件；如果文件不存在，程序会创建一个默认的空配置（`provider` 为 `"custom"`，`api_key`/`api_url`/`model` 为空），此时需要你在界面中的设置窗口中手动填写正确的模型服务信息。
 
 ## 快速开始
 
@@ -157,7 +159,7 @@ MistAI 是一个基于 Go 与 Fyne 的本地桌面 AI 助手应用，支持调�
   - 悬停可查看详细释义与例句
 - 设置与模型
   - 点击界面中的「⚙」按钮打开设置窗口（`gui/gui.go:801`）
-  - 可切换 API 类型（OpenAI、智谱 GLM、自定义）、修改 URL、模型与 API Key
+  - 可切换 API 类型（OpenAI、OpenRouter、自定义）、修改 URL、模型与 API Key
 - 全局快捷键
   - 在系统中复制文本后按 `Ctrl + C`，应用会自动将剪贴板内容填入输入框并聚焦（`gui/gui.go:125`）
 

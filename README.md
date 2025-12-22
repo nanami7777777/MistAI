@@ -129,10 +129,6 @@ MistAI 是一个基于 Go 与 Fyne 的本地桌面 AI 助手应用，支持调�
      ```bash
      net start MongoDB
      ```
-   - Linux/macOS：
-     ```bash
-     sudo systemctl start mongod
-     ```
 5. 运行应用
    - 调试运行：
      ```bash

@@ -13,6 +13,7 @@ import (
 
 func main() {
 	// 加载配置文件
+	fmt.Printf("加载配置文件...")
 	starttime := time.Now()
 	if _, err := config.LoadConfig(); err != nil {
 		fmt.Printf("加载配置失败: %v\n", err)
@@ -25,7 +26,7 @@ func main() {
 		return
 	}
 	defer database.CloseDB()
-
+	
 	log.SetFormatter(&log.TextFormatter{
 		FullTimestamp: true, // 显示完整时间
 	})

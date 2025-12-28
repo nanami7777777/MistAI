@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -32,6 +33,8 @@ var (
 	dictionaryEntries         []database.DictionaryEntry // 新增：用于存储单词条目
 	historyTooltipContent     *widget.RichText
 	mainWindow                fyne.Window
+	settingsWindow            fyne.Window
+	currentHotkeyGeneration   int64
 	messageService            *service.MessageService
 	conversationService       *service.ConversationService
 	configService             *service.ConfigService
@@ -122,8 +125,29 @@ func createConversationList() fyne.CanvasObject {
 	return container.NewBorder(newConvBtn, nil, nil, nil, convScroll)
 }
 
-func setupHotKeys(w fyne.Window) {
-	hook.Register(hook.KeyDown, []string{"ctrl", "c"}, func(e hook.Event) {
+func parseHotkeyString(hotkeyStr string) []string {
+	parts := strings.Split(hotkeyStr, "+")
+	var keys []string
+	for _, p := range parts {
+		p = strings.TrimSpace(strings.ToLower(p))
+		if p != "" {
+			keys = append(keys, p)
+		}
+	}
+	if len(keys) == 0 {
+		return []string{"ctrl", "c"}
+	}
+	return keys
+}
+
+func registerClipboardHotkey(hotkey []string, w fyne.Window, generation int64) {
+	hook.Register(hook.KeyDown, hotkey, func(e hook.Event) {
+		if atomic.LoadInt64(&currentHotkeyGeneration) != generation {
+			return
+		}
+		if settingsWindow != nil {
+			return
+		}
 		txt, err := clipboard.ReadAll()
 		if err != nil {
 			log.Println("读取剪贴板失败:", err)
@@ -157,6 +181,19 @@ func setupHotKeys(w fyne.Window) {
 			}
 		}()
 	})
+}
+
+func setupHotKeys(w fyne.Window) {
+	hotkeyStr := "ctrl+c"
+	if configService != nil {
+		cfg, err := configService.GetConfig()
+		if err == nil && cfg.Hotkey != "" {
+			hotkeyStr = cfg.Hotkey
+		}
+	}
+
+	gen := atomic.AddInt64(&currentHotkeyGeneration, 1)
+	registerClipboardHotkey(parseHotkeyString(hotkeyStr), w, gen)
 
 	go func() {
 		s := hook.Start()
@@ -760,13 +797,23 @@ func showSettingsDialog() {
 		return
 	}
 
+	if settingsWindow != nil {
+		settingsWindow.Show()
+		settingsWindow.RequestFocus()
+		settingsWindow.CenterOnScreen()
+		return
+	}
+
 	cfg, err := configService.GetConfig()
 	if err != nil {
 		showError("加载配置失败", err)
 		return
 	}
 
-	settingsWindow := fyne.CurrentApp().NewWindow("设置")
+	settingsWindow = fyne.CurrentApp().NewWindow("设置")
+	settingsWindow.SetOnClosed(func() {
+		settingsWindow = nil
+	})
 
 	providerLabels := make([]string, len(providerOptions))
 	for i, opt := range providerOptions {
@@ -777,7 +824,7 @@ func showSettingsDialog() {
 
 	currentProviderKey := cfg.Provider
 	if currentProviderKey == "" {
-		currentProviderKey = "zhipu_glm"
+		currentProviderKey = "openrouter"
 	}
 
 	initialLabel := providerLabels[0]
@@ -802,13 +849,21 @@ func showSettingsDialog() {
 	modelEntry.SetText(cfg.Model)
 	modelEntry.SetPlaceHolder("请输入模型名称")
 
+	hotkeyEntry := widget.NewEntry()
+	hotkeyEntry.SetPlaceHolder("例如: ctrl+c")
+	if cfg.Hotkey != "" {
+		hotkeyEntry.SetText(cfg.Hotkey)
+	} else {
+		hotkeyEntry.SetText("ctrl+c")
+	}
+
 	providerSelect.OnChanged = func(label string) {
 		for _, opt := range providerOptions {
 			if opt.Label == label {
 				if opt.DefaultURL != "" {
 					apiURLEntry.SetText(opt.DefaultURL)
 				}
-				if opt.DefaultModel != "" {
+		if opt.DefaultModel != "" {
 					modelEntry.SetText(opt.DefaultModel)
 				}
 				break
@@ -822,6 +877,7 @@ func showSettingsDialog() {
 			{Text: "API Key", Widget: apiKeyEntry},
 			{Text: "API URL", Widget: apiURLEntry},
 			{Text: "Model", Widget: modelEntry},
+			{Text: "全局快捷键", Widget: hotkeyEntry},
 		},
 		OnSubmit: func() {
 			if apiKeyEntry.Text == "" {
@@ -848,18 +904,39 @@ func showSettingsDialog() {
 				selectedProviderKey = "custom"
 			}
 
+			hotkeyValue := strings.TrimSpace(hotkeyEntry.Text)
+			if hotkeyValue == "" {
+				hotkeyValue = "ctrl+c"
+			}
+
+			hotkeyParts := parseHotkeyString(hotkeyValue)
+			normalizedHotkey := strings.Join(hotkeyParts, "+")
+
 			newConfig := &service.AppConfig{
 				Provider: selectedProviderKey,
 				APIKey:   apiKeyEntry.Text,
 				APIURL:   apiURLEntry.Text,
 				Model:    modelEntry.Text,
+				Hotkey:   normalizedHotkey,
 			}
 			if err := configService.SaveConfig(newConfig); err != nil {
 				dialog.ShowError(fmt.Errorf("保存配置失败: %v", err), settingsWindow)
 				return
 			}
+			cfgAfter, err := configService.GetConfig()
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("保存后读取配置失败: %v", err), settingsWindow)
+				return
+			}
+			if cfgAfter.Hotkey != normalizedHotkey {
+				dialog.ShowError(fmt.Errorf("保存后配置与期望不一致: 当前为 %s，期望为 %s", cfgAfter.Hotkey, normalizedHotkey), settingsWindow)
+				return
+			}
 
-			dialog.ShowInformation("成功", "配置已保存", settingsWindow)
+			gen := atomic.AddInt64(&currentHotkeyGeneration, 1)
+			registerClipboardHotkey(hotkeyParts, mainWindow, gen)
+
+			dialog.ShowInformation("成功", fmt.Sprintf("配置已保存，当前全局快捷键：%s", cfgAfter.Hotkey), settingsWindow)
 			settingsWindow.Close()
 		},
 		OnCancel: func() { settingsWindow.Close() },

@@ -20,6 +20,7 @@ type AppConfig struct {
 	APIURL   string      `json:"api_url"`
 	Model    string      `json:"model"`
 	MongoDB  MongoConfig `json:"mongodb"`
+	Hotkey   string      `json:"hotkey"`
 }
 
 var (
@@ -42,6 +43,7 @@ func LoadConfig() (*AppConfig, error) {
 				DatabaseName:      "chat_assistant",
 				ConnectionTimeout: 10,
 			},
+			Hotkey: "ctrl+c",
 		}
 		if err := SaveConfig(defaultConfig); err != nil {
 			return nil, fmt.Errorf("创建默认配置失败: %v", err)

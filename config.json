@@ -1,11 +1,12 @@
 {
-  "provider": "zhipu_glm",
+  "provider": "openrouter",
   "api_key": "",
   "api_url": "https://openrouter.ai/api/v1/chat/completions",
   "model": "xiaomi/mimo-v2-flash:free",
   "mongodb": {
-    "connection_string": "",
-    "database_name": "",
-    "connection_timeout": 0
-  }
+    "connection_string": "mongodb://localhost:27017",
+    "database_name": "chat_assistant",
+    "connection_timeout": 10
+  },
+  "hotkey": "alt+c"
 }

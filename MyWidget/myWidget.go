@@ -99,6 +99,41 @@ func (e *MyMultiLine) KeyUp(ev *fyne.KeyEvent) {
 	e.Entry.KeyUp(ev)
 }
 
+type ReadOnlyEntry struct {
+	widget.Entry
+	original      string
+	OnRightTapped func()
+}
+
+func NewReadOnlyEntry(text string) *ReadOnlyEntry {
+	e := &ReadOnlyEntry{original: text}
+	e.MultiLine = true
+	e.Wrapping = fyne.TextWrapWord
+	e.ExtendBaseWidget(e)
+	e.Entry.SetText(text)
+	e.OnChanged = func(string) {
+		e.Entry.SetText(e.original)
+	}
+	return e
+}
+
+func (e *ReadOnlyEntry) SetText(text string) {
+	e.original = text
+	e.OnChanged = nil
+	e.Entry.SetText(text)
+	e.OnChanged = func(string) {
+		e.Entry.SetText(e.original)
+	}
+}
+
+func (e *ReadOnlyEntry) TappedSecondary(ev *fyne.PointEvent) {
+	if e.OnRightTapped != nil {
+		e.OnRightTapped()
+	} else {
+		e.Entry.TappedSecondary(ev)
+	}
+}
+
 type ConversationItem struct {
 	widget.BaseWidget
 	Label         *widget.Label

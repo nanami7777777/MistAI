@@ -143,8 +143,9 @@ func (s *MessageService) StreamMessage(req SendMessageRequest) {
 		// Goroutine to process chunks from the LLM in real-time using a trigger-based state machine
 		go func() {
 			defer wg.Done()
-			const jsonStartTrigger = "<DA" // Use a short, reliable trigger
-			parsingMode := "text"          // "text" or "json"
+			const jsonStartTagTrigger = "<DAT"
+			const jsonStartPlainTrigger = "DAT"
+			parsingMode := "text" // "text" or "json"
 
 			for chunk := range llmChan {
 				if parsingMode == "json" {
@@ -153,7 +154,11 @@ func (s *MessageService) StreamMessage(req SendMessageRequest) {
 				}
 
 				// We are in text mode, check for the trigger
-				if idx := strings.Index(chunk, jsonStartTrigger); idx != -1 {
+				idx := strings.Index(chunk, jsonStartTagTrigger)
+				if idx == -1 {
+					idx = strings.Index(chunk, jsonStartPlainTrigger)
+				}
+				if idx != -1 {
 					// Found the trigger, switch to JSON mode
 					textPart := chunk[:idx]
 					jsonPart := chunk[idx:]
@@ -195,18 +200,9 @@ func (s *MessageService) StreamMessage(req SendMessageRequest) {
 		wg.Wait()
 
 		// Now that the stream is fully processed, clean up the JSON and save the results
-		const jsonStartTag = "<DATA_JSON>"
-		const jsonEndTag = "</DATA_JSON>"
 		userResponse := textBuffer.String()
 		jsonDataWithTags := jsonBuffer.String()
-		cleanedJson := ""
-
-		if startTagIdx := strings.Index(jsonDataWithTags, jsonStartTag); startTagIdx != -1 {
-			contentStartIdx := startTagIdx + len(jsonStartTag)
-			if endTagIdx := strings.Index(jsonDataWithTags, jsonEndTag); endTagIdx != -1 {
-				cleanedJson = jsonDataWithTags[contentStartIdx:endTagIdx]
-			}
-		}
+		cleanedJson := extractJSONFromBuffer(jsonDataWithTags)
 
 		aiMsgID, err := database.SaveMessage("assistant", userResponse)
 		if err != nil {
@@ -270,4 +266,40 @@ func (s *MessageService) StopStreaming() {
 	if s.cancelFunc != nil {
 		s.cancelFunc()
 	}
+}
+
+// extractJSONFromBuffer tries to extract a JSON object from a buffer that may contain
+// either legacy <DATA_JSON>...</DATA_JSON> tags or a plain "DATA_JSON" section with
+// a fenced ```json code block.
+func extractJSONFromBuffer(buf string) string {
+	const jsonStartTag = "<DATA_JSON>"
+	const jsonEndTag = "</DATA_JSON>"
+
+	if buf == "" {
+		return ""
+	}
+
+	if startTagIdx := strings.Index(buf, jsonStartTag); startTagIdx != -1 {
+		contentStartIdx := startTagIdx + len(jsonStartTag)
+		if endTagIdx := strings.Index(buf, jsonEndTag); endTagIdx != -1 && endTagIdx > contentStartIdx {
+			return buf[contentStartIdx:endTagIdx]
+		}
+	}
+
+	sectionIdx := strings.Index(buf, "DATA_JSON")
+	if sectionIdx == -1 {
+		return ""
+	}
+	rest := buf[sectionIdx:]
+
+	startBrace := strings.Index(rest, "{")
+	if startBrace == -1 {
+		return ""
+	}
+	endBrace := strings.LastIndex(rest, "}")
+	if endBrace == -1 || endBrace <= startBrace {
+		return ""
+	}
+
+	return rest[startBrace : endBrace+1]
 }

@@ -26,6 +26,7 @@ var (
 	messages                  []service.Message
 	mu                        sync.Mutex
 	entry                     *mywidget.MyMultiLine
+	chatTranscript            *mywidget.ReadOnlyEntry
 	chatList                  *fyne.Container
 	scroll                    *container.Scroll
 	conversationList          *fyne.Container
@@ -83,10 +84,20 @@ func createMainLayout(convListContainer, chatArea, historyView fyne.CanvasObject
 }
 
 func createChatArea() fyne.CanvasObject {
-	chatList = container.NewVBox()
-	loadCurrentConversationMessagesAsync()
+	chatTranscript = mywidget.NewReadOnlyEntry("")
+	chatTranscript.OnRightTapped = func() {
+		if chatTranscript == nil {
+			return
+		}
+		selected := strings.TrimSpace(chatTranscript.SelectedText())
+		if selected == "" {
+			dialog.ShowInformation("提示", "请先在对话中选中要查询的单词", mainWindow)
+			return
+		}
+		sendWordToLLM(selected)
+	}
 
-	scroll = container.NewVScroll(chatList)
+	scroll = container.NewVScroll(chatTranscript)
 	scroll.SetMinSize(fyne.NewSize(200, 300))
 
 	entry = mywidget.NewMyMultiLine(sendMessage)
@@ -102,6 +113,9 @@ func createChatArea() fyne.CanvasObject {
 	topBar := container.NewBorder(nil, nil, nil, settingsBtn, widget.NewLabel(""))
 	bottomButtons := container.NewHBox(stopBtn)
 	bottom := container.NewBorder(nil, nil, nil, bottomButtons, entry)
+
+	chatList = container.NewVBox()
+	loadCurrentConversationMessagesAsync()
 
 	return container.NewBorder(topBar, bottom, nil, nil, scroll)
 }
@@ -426,31 +440,35 @@ func hideHistoryDetails(index int) {
 
 func handleUserMessageSent(event service.MessageEvent) {
 	if event.Message != nil {
-		appendMessage(chatList, "你", event.Message.Content, event.Message.ID)
+		appendToTranscript("你", event.Message.Content)
 		entry.SetText("")
 		updateCurrentConversationTitleIfNeeded(event.Message.Content)
 	}
 }
 
 func handleAIResponseStart() {
-	// Create streaming message container
-	currentStreamingLabel = widget.NewLabel("AI:")
-	currentStreamingLabel.Wrapping = fyne.TextWrapBreak
-	currentStreamingContainer = container.NewVBox(currentStreamingLabel)
-	chatList.Add(currentStreamingContainer)
-	scroll.ScrollToBottom()
+	if chatTranscript == nil {
+		return
+	}
+	text := chatTranscript.Text
+	if text != "" && !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	text += "AI: "
+	chatTranscript.SetText(text)
+	if scroll != nil {
+		scroll.ScrollToBottom()
+	}
 }
 
 func handleAIResponseChunk(event service.MessageEvent) {
-	// Update streaming content in real-time
-	if currentStreamingLabel != nil && event.Content != "" {
-		currentText := currentStreamingLabel.Text
-		if currentText == "AI:" || currentText == "AI: " {
-			currentStreamingLabel.SetText("AI:\n" + event.Content)
-		} else {
-			currentStreamingLabel.SetText(currentText + event.Content)
-		}
-		currentStreamingLabel.Refresh()
+	if chatTranscript == nil || event.Content == "" {
+		return
+	}
+	currentText := chatTranscript.Text
+	currentText += event.Content
+	chatTranscript.SetText(currentText)
+	if scroll != nil {
 		scroll.ScrollToBottom()
 	}
 }
@@ -461,17 +479,18 @@ func handleAIResponseComplete(event service.MessageEvent) {
 		messages = append(messages, *event.Message)
 		mu.Unlock()
 
-		// Replace streaming container with final message
-		if currentStreamingContainer != nil {
-			// Remove streaming container
-			removeContainerFromList(chatList, currentStreamingContainer)
-			currentStreamingContainer = nil
-			currentStreamingLabel = nil
+		if chatTranscript != nil && event.Message.Content != "" {
+			text := chatTranscript.Text
+			if !strings.Contains(text, event.Message.Content) {
+				appendToTranscript("AI", event.Message.Content)
+			} else if !strings.HasSuffix(text, "\n") {
+				text += "\n"
+				chatTranscript.SetText(text)
+			}
+			if scroll != nil {
+				scroll.ScrollToBottom()
+			}
 		}
-
-		// Add final message with delete button
-		appendMessage(chatList, "AI", event.Message.Content, event.Message.ID)
-		scroll.ScrollToBottom()
 	}
 	refreshHistoryView()
 }
@@ -640,8 +659,9 @@ func loadCurrentConversationMessagesAsync() {
 
 // loadCurrentConversationMessages 加载当前对话的消息
 func loadCurrentConversationMessages() {
-	chatList.RemoveAll()
-
+	if chatTranscript != nil {
+		chatTranscript.SetText("")
+	}
 	starttime := time.Now()
 	history, err := messageService.LoadMessages()
 	if err != nil {
@@ -669,20 +689,13 @@ func loadCurrentConversationMessages() {
 		} else if history[i].Role == "system" {
 			continue
 		}
-		appendMessage(chatList, sender, history[i].Content, history[i].ID)
+		appendToTranscript(sender, history[i].Content)
 	}
 	fmt.Println("界面渲染耗时：", time.Since(starttime))
 
 	if scroll != nil {
 		scroll.ScrollToBottom()
 	}
-}
-
-func createMessageWithDeleteButton(content fyne.CanvasObject, messageID uint) *fyne.Container {
-	deleteBtn := widget.NewButton("删除", func() {
-		handleDeleteMessage(messageID)
-	})
-	return container.NewBorder(nil, nil, nil, deleteBtn, content)
 }
 
 func normalizeMarkdownContent(s string) string {
@@ -695,24 +708,27 @@ func normalizeMarkdownContent(s string) string {
 	return s
 }
 
-// appendMessage adds a new message to the chat list
-func appendMessage(chatList *fyne.Container, sender, content string, messageID uint) {
-	header := widget.NewRichTextFromMarkdown("**" + sender + ":**")
-	body := widget.NewRichTextFromMarkdown(normalizeMarkdownContent(content))
-	body.Wrapping = fyne.TextWrapBreak
-	messageContent := container.NewVBox(header, body)
-
-	messageRow := createMessageWithDeleteButton(messageContent, messageID)
-	chatList.Add(messageRow)
-
-	// Store metadata for this message
-	service.MetadataMu.Lock()
-	service.MessageMetadata[messageRow] = service.Metadata{
-		ID:      messageID,
-		Sender:  sender,
-		Content: content,
+func sendWordToLLM(word string) {
+	w := strings.TrimSpace(word)
+	if w == "" {
+		return
 	}
-	service.MetadataMu.Unlock()
+	messageService.StreamMessage(service.SendMessageRequest{Content: w})
+}
+
+func appendToTranscript(sender, content string) {
+	if chatTranscript == nil {
+		return
+	}
+	text := chatTranscript.Text
+	if text != "" && !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	text += sender + ": " + normalizeMarkdownContent(content) + "\n"
+	chatTranscript.SetText(text)
+	if scroll != nil {
+		scroll.ScrollToBottom()
+	}
 }
 
 // handleDeleteMessage handles deletion of a message by its ID
@@ -789,7 +805,7 @@ func sendMessage() {
 
 	// The service now handles all the complexity of streaming, parsing, and storing.
 	// The GUI's role is just to initiate the request and then react to events.
-	go messageService.StreamMessage(service.SendMessageRequest{Content: text})
+	messageService.StreamMessage(service.SendMessageRequest{Content: text})
 }
 
 func showSettingsDialog() {
@@ -863,7 +879,7 @@ func showSettingsDialog() {
 				if opt.DefaultURL != "" {
 					apiURLEntry.SetText(opt.DefaultURL)
 				}
-		if opt.DefaultModel != "" {
+				if opt.DefaultModel != "" {
 					modelEntry.SetText(opt.DefaultModel)
 				}
 				break
